@@ -1,0 +1,20 @@
+.build/
+.build-native/
+build/
+dist/
+.DS_Store
+*.xcuserstate
+
+# Local planning, machine-specific evidence, and private runtime data
+BUILD-BRIEF.md
+SAFETY-REVIEW.md
+VERIFICATION.md
+.env
+.env.*
+*.pem
+*.key
+__pycache__/
+*.pyc
+.wrangler/
+release-assets/
+Resources/UpdateConfiguration.local.json
