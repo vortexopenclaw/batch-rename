@@ -17,7 +17,7 @@ struct Row: Identifiable {
     var done = false
     var error: String?
     var preview: NamePreview?
-    var status: String { error ?? (done ? "Completed · frozen" : (preview?.skipped == true ? "Already ends with this text" : (original == proposed ? "Unchanged" : "Pending"))) }
+    var status: String { error ?? (done ? "Completed" : (preview?.skipped == true ? "Already ends with this text" : (original == proposed ? "Unchanged" : "Pending"))) }
 }
 @MainActor final class Model: ObservableObject {
     @Published var rows: [Row] = []
@@ -26,6 +26,14 @@ struct Row: Identifiable {
     @Published var folders = false { didSet { rebuild() } }
     @Published var recursive = false { didSet { rebuild() } }
     @Published var busy = false
+    @Published private(set) var installing = false
+    var controlsLocked: Bool { busy || installing }
+    func beginInstallation() -> Bool {
+        guard startupHealthy, !controlsLocked else { return false }
+        installing = true
+        return true
+    }
+    func endInstallation() { installing = false; drainPending() }
     @Published var message = "Drop files or folders here to begin."
     @Published var undoAvailable = false
     private var inventory = Inventory()
@@ -59,7 +67,7 @@ struct Row: Identifiable {
         let panel = NSOpenPanel(); panel.canChooseFiles = true; panel.canChooseDirectories = true; panel.allowsMultipleSelection = true
         if panel.runModal() == .OK { add(panel.urls) }
     }
-    func clear() { guard !busy else { return }; rows = []; inventory.roots = []; plan = []; message = engineFailure ?? "List cleared. Description and undo history preserved." }
+    func clear() { guard !controlsLocked else { return }; rows = []; inventory.roots = []; plan = []; message = engineFailure ?? "List cleared. Description and undo history preserved." }
     private func key(_ e: Entry) -> String { "\(e.path)|\(e.identity.device)|\(e.identity.inode)|\(e.identity.birth)|\(e.identity.nanos)" }
     private func refreshFrozen() {
         frozen = []
@@ -73,7 +81,7 @@ struct Row: Identifiable {
         }
     }
     func rebuild() {
-        guard !busy else { rebuildPending = true; return }
+        guard !controlsLocked else { rebuildPending = true; return }
         rebuildPending = false
         inventory.append(pendingURLs.map(\.path))
         pendingURLs = []
@@ -103,7 +111,7 @@ struct Row: Identifiable {
         }
     }
     func preview() {
-        guard !busy else { return }
+        guard !controlsLocked else { return }
         guard engine != nil else {
             plan = []; message = engineFailure ?? "Rename unavailable: undo engine is not initialized."
             return
@@ -122,7 +130,7 @@ struct Row: Identifiable {
         catch { plan = []; message = error.localizedDescription }
     }
     func apply() {
-        guard !busy, let engine, !plan.isEmpty else { return }
+        guard !controlsLocked, let engine, !plan.isEmpty else { return }
         busy = true
         cancellation.set(false)
         let token = cancellation
@@ -130,6 +138,9 @@ struct Row: Identifiable {
         worker.async {
             let result = Result { try engine.apply(plan, cancelled: { token.requested }) }
             let steps = Array(engine.steps.dropFirst(start)).filter { $0.done && !$0.undone }
+            let completed = plan.filter { item in steps.contains { $0.destination == item.destination } }
+            let completedFolders = completed.filter { $0.entry.identity.folder }.count
+            let completion = RenamePresentation.completion(files: completed.count - completedFolders, folders: completedFolders)
             DispatchQueue.main.async {
                 for i in self.rows.indices {
                     var path = self.rows[i].entry.path
@@ -153,15 +164,15 @@ struct Row: Identifiable {
                 self.refreshFrozen()
                 self.busy = false; self.undoAvailable = engine.canUndo; self.preview()
                 switch result {
-                case .success: self.message = "Renamed \(steps.count) filesystem steps. Completed rows are frozen."
-                case .failure(let error): self.message = "Stopped after \(steps.count) steps. \(error.localizedDescription) Undo remains available."
+                case .success: self.message = completion
+                case .failure(let error): self.message = "\(completion) Stopped: \(error.localizedDescription) Undo remains available."
                 }
                 self.drainPending()
             }
         }
     }
     func undo() {
-        guard !busy, let engine else { return }; busy = true
+        guard !controlsLocked, let engine else { return }; busy = true
         worker.async {
             let result = Result { try engine.undo() }
             DispatchQueue.main.async {
@@ -202,18 +213,6 @@ struct ContentView: View {
         case .ext: return "The file extension"
         }
     }
-    private func highlight(_ name: String, ranges: [NSRange], source: Bool, deletion: Bool) -> AttributedString {
-        var value = AttributedString(name)
-        for range in ranges where range.length > 0 {
-            guard let stringRange = Range(range, in: name),
-                  let lower = AttributedString.Index(stringRange.lowerBound, within: value),
-                  let upper = AttributedString.Index(stringRange.upperBound, within: value) else { continue }
-            value[lower..<upper].backgroundColor = source ? Color.yellow.opacity(0.3) : Color.green.opacity(0.25)
-            if deletion { value[lower..<upper].strikethroughStyle = Text.LineStyle(pattern: .solid) }
-        }
-        return value
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
@@ -266,16 +265,16 @@ struct ContentView: View {
                 .toggleStyle(.checkbox)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(20)
-                }.frame(width: 500).disabled(model.busy)
+                }.frame(width: 500).disabled(model.controlsLocked)
                 Divider()
                 VStack(alignment: .leading, spacing: 0) {
                     HStack {
                         Text("Preview").font(.title2.bold())
                         Text("\(model.rows.count) items").foregroundStyle(.secondary)
                         Spacer()
-                        Button("Add Files or Folders…", action: model.choose).disabled(model.busy)
+                        Button("Add Files or Folders…", action: model.choose).disabled(model.controlsLocked)
                         Button("Clear List", action: model.clear)
-                            .disabled(model.busy || model.rows.isEmpty)
+                            .disabled(model.controlsLocked || model.rows.isEmpty)
                             .help("Removes entries from this window only; preserves text and undo")
                     }.padding(20)
                     if model.rows.isEmpty {
@@ -298,16 +297,20 @@ struct ContentView: View {
                     } else {
                     Table(model.rows) {
                         TableColumn("Current Name") { row in
-                            Label { Text(highlight(row.original, ranges: row.preview?.sourceMatches ?? [], source: true, deletion: row.preview?.deletion == true)) } icon: { Image(systemName: row.entry.identity.link ? "link" : (row.entry.identity.folder ? "folder" : "doc")) }.lineLimit(1).help(row.entry.path)
-                        }
-                        TableColumn("New Name") { row in
-                            VStack(alignment: .leading) {
-                                Text(highlight(row.proposed, ranges: row.preview?.replacements ?? [], source: false, deletion: false)).foregroundStyle(row.done ? .green : .primary)
-                                if row.preview?.deletion == true || row.proposed.count < row.original.count { Text("Text removed").font(.caption2).foregroundStyle(.orange) }
+                            HStack(spacing: 6) {
+                                Image(systemName: row.entry.identity.link ? "link" : (row.entry.identity.folder ? "folder" : "doc")).foregroundStyle(.secondary).help(row.entry.path)
+                                FilenameView(name: row.original, ranges: row.done ? [] : row.preview?.sourceMatches ?? [], deletion: !row.done && row.preview?.deletion == true, operation: model.operation)
                             }
                         }
-                        TableColumn("Status") { row in Text(row.status).font(.caption).fixedSize(horizontal: false, vertical: true) }.width(min: 150, ideal: 180)
-                        TableColumn("Location") { row in Text(URL(fileURLWithPath: row.entry.path).deletingLastPathComponent().path).font(.caption).foregroundStyle(.secondary) }
+                        TableColumn("New Name") { row in
+                            HStack(spacing: 6) {
+                                FilenameView(name: row.proposed, ranges: row.done ? [] : row.preview?.replacements ?? [], deletion: false, operation: model.operation)
+                                if row.done { Image(systemName: "checkmark").foregroundStyle(.secondary).help("Completed") }
+                                else if let error = row.error { Image(systemName: "exclamationmark.triangle").help(error).accessibilityLabel(error) }
+                                else if row.preview?.skipped == true { Image(systemName: "info.circle").foregroundStyle(.secondary).help("Already ends with this text") }
+                                else if row.preview?.deletion == true { Image(systemName: "minus.circle").foregroundStyle(.secondary).help("Text removed") }
+                            }
+                        }
                     }
                     }
                 }
@@ -317,8 +320,8 @@ struct ContentView: View {
                 if model.busy { ProgressView().controlSize(.small); Button("Cancel", action: model.cancel) }
                 Text(model.message).font(.callout).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 Spacer()
-                Button("Undo Last Batch", action: model.undo).fixedSize().disabled(model.busy || !model.undoAvailable)
-                Button("Rename \(model.pendingCount) Items", action: model.apply).fixedSize().buttonStyle(.borderedProminent).disabled(model.busy || model.pendingCount == 0)
+                Button("Undo Last Batch", action: model.undo).fixedSize().disabled(model.controlsLocked || !model.undoAvailable)
+                Button("Rename \(model.pendingCount) Items", action: model.apply).fixedSize().buttonStyle(.borderedProminent).disabled(model.controlsLocked || model.pendingCount == 0)
             }.padding(16)
         }.frame(minWidth: 1200, minHeight: 600)
         .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
@@ -341,7 +344,7 @@ struct BatchRenameApp: App {
     @StateObject private var model = AppDelegate.model ?? Model()
     @StateObject private var updater = AppUpdater()
     var body: some Scene {
-        WindowGroup("Batch Rename") { ContentView(model: model).onAppear { AppDelegate.model = model; AppUpdater.acknowledge(); AppUpdater.showRecoveryNotice(); AppUpdater.reportFixture("view-appeared") } }
+        WindowGroup("Batch Rename") { ContentView(model: model).onAppear { AppDelegate.model = model; AppUpdater.acknowledge(); AppUpdater.showRecoveryNotice(); AppUpdater.reportFixture("view-appeared"); updater.checkAtStartup() } }
             .commands {
                 CommandGroup(after: .appInfo) {
                     Button("Check for Updates…") { updater.check() }.disabled(updater.busy || model.busy)

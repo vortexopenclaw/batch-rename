@@ -15,24 +15,41 @@ private struct InstallPlan: Codable {
 
 @MainActor final class AppUpdater: ObservableObject {
     @Published var busy = false
-    func check() {
-        guard !busy, AppDelegate.model?.startupHealthy == true, AppDelegate.model?.busy != true else { return }
+    private(set) var checkedAtStartup = false
+    func checkAtStartup() {
+        guard !checkedAtStartup else { return }
+        checkedAtStartup = true
+        check(automatic: true)
+    }
+    private func waitForIdle() async throws {
+        while AppDelegate.model?.busy == true {
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        guard AppDelegate.model?.startupHealthy == true else { throw RenameError("Updates require a healthy rename engine. Resolve the startup error first.") }
+    }
+    func check(automatic: Bool = false) {
+        guard !busy else { return }
         busy = true
         Task {
-            defer { busy = false }
+            var installationModel: Model?
+            defer { installationModel?.endInstallation(); busy = false }
             do {
                 let config = try UpdateConfiguration.load()
                 let fetcher = UpdateFetcher()
                 let manifest = try JSONDecoder().decode(UpdateManifest.self, from: await fetcher.fetch(config.manifestURL, limit: 65536))
                 let os = ProcessInfo.processInfo.operatingSystemVersion
                 try UpdatePolicy.validate(manifest, trust: config.trust, currentVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "", osVersion: "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)", allowCurrent: true)
+                try await waitForIdle()
                 if manifest.version == Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
+                    guard !automatic else { return }
                     let alert = NSAlert(); alert.messageText = "Batch Rename is up to date"; alert.runModal(); return
                 }
                 let alert = NSAlert(); alert.messageText = "Install Batch Rename \(manifest.version)?"
                 alert.informativeText = "The app will quit and reopen. Your current app will be retained in a backup beside it."
-                alert.addButton(withTitle: "Install Update"); alert.addButton(withTitle: "Cancel")
+                alert.addButton(withTitle: "Install and Restart"); alert.addButton(withTitle: "Later")
                 guard alert.runModal() == .alertFirstButtonReturn else { return }
+                guard let model = AppDelegate.model, model.beginInstallation() else { throw RenameError("Wait for the current file operation to finish, then check again.") }
+                installationModel = model
                 let data = try await fetcher.fetch(manifest.downloadURL, limit: 256 * 1024 * 1024)
                 try UpdatePolicy.validateArchive(data, manifest: manifest)
                 guard AppDelegate.model?.busy != true else { throw RenameError("Wait for the current file operation to finish, then check again.") }
@@ -60,7 +77,12 @@ private struct InstallPlan: Codable {
                     process.terminate(); throw RenameError("Update helper did not become ready. Original retained.")
                 }
                 NSApplication.shared.terminate(nil)
-            } catch { let alert = NSAlert(); alert.messageText = "Update not installed"; alert.informativeText = error.localizedDescription; alert.runModal() }
+            } catch {
+                // Startup failures are silent; failures after accepting installation are actionable.
+                guard !automatic || installationModel != nil else { return }
+                while AppDelegate.model?.busy == true { try? await Task.sleep(nanoseconds: 100_000_000) }
+                let alert = NSAlert(); alert.messageText = "Update not installed"; alert.informativeText = error.localizedDescription; alert.runModal()
+            }
         }
     }
     // Invalid fixture configuration must never fall back to the user's undo history.

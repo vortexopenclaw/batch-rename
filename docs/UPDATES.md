@@ -1,6 +1,8 @@
 # Batch Rename updates and distribution
 
-This is an ad-hoc-signed (no Developer ID, no notarization) app with an Ed25519-authenticated updater. The bundled public key is the release trust anchor. The Worker and GitHub never supply a replacement trust key. No endpoint or key is configured in this checkout.
+This is an ad-hoc-signed (no Developer ID, no notarization) app with an Ed25519-authenticated updater. The bundled public key is the release trust anchor. The Worker and GitHub never supply a replacement trust key. Version 0.1.1 (build 2) bundles the parent-managed public configuration unchanged. The service will be enabled at `https://batch-rename-updates.vortexradar.workers.dev/batch-rename/manifest.json` and `/batch-rename/download`.
+
+Once per launch a silent startup check fetches the manifest; offline and current-version results do not show a dialog. Manual Check for Updates reports current-version and error results. A valid newer release offers Install and Restart / Later only after rename operations finish and the engine is healthy. Accepting installation blocks new file operations until failure or restart. Requests send an explicit app User-Agent and JSON/ZIP Accept headers.
 
 Check for Updates fetches the configured HTTPS manifest without redirects, cookies or persistent URL cache. It verifies all known manifest fields using Swift sorted-key JSON without escaped slashes, checks bundle ID, a strictly newer three-component version, minimum macOS, the exact download URL and scoped asset key, then requests user confirmation. The download is capped at 256 MiB and checked against the signed SHA-256 before extraction. Manifest size is capped at 64 KiB. Network errors leave the installed app untouched. A concurrent latest-release change can produce a checksum failure; retry the check.
 

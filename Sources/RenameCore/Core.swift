@@ -47,10 +47,16 @@ public struct RenameOperation: Equatable {
                 result.skipped = true; return result
             }
             transformed = value + text
-            if !text.isEmpty { result.replacements = [NSRange(location: prefix.utf16.count + value.utf16.count, length: text.utf16.count)] }
+            if !text.isEmpty {
+                result.sourceMatches = [NSRange(location: prefix.utf16.count + value.utf16.count, length: 0)]
+                result.replacements = [NSRange(location: prefix.utf16.count + value.utf16.count, length: text.utf16.count)]
+            }
         case .prepend:
             transformed = text + value
-            if !text.isEmpty { result.replacements = [NSRange(location: prefix.utf16.count, length: text.utf16.count)] }
+            if !text.isEmpty {
+                result.sourceMatches = [NSRange(location: prefix.utf16.count, length: 0)]
+                result.replacements = [NSRange(location: prefix.utf16.count, length: text.utf16.count)]
+            }
         case .replace:
             guard !search.isEmpty else { throw RenameError("Enter text to find.") }
             let options: String.CompareOptions = ignoreCase ? [.literal, .caseInsensitive] : [.literal]

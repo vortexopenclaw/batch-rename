@@ -3,6 +3,38 @@ import XCTest
 import Foundation
 
 final class ModelTests: XCTestCase {
+    @MainActor func testCaseHopCountsOneEntryAndInstallationBlocksOperations() async throws {
+        let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"]!).appendingPathComponent("count-lock-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("clip.txt")
+        try Data("fixture".utf8).write(to: file)
+        let model = Model(journalURL: root.appendingPathComponent("journal/undo.json"))
+        func wait() async throws {
+            for _ in 0..<500 {
+                if !model.busy { return }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            XCTFail("Model did not finish")
+        }
+        model.operation.action = .replace; model.operation.search = "clip"; model.operation.text = "CLIP"
+        model.add([file]); try await wait()
+        XCTAssertTrue(model.beginInstallation())
+        XCTAssertFalse(model.beginInstallation())
+        model.apply(); model.undo(); model.clear()
+        XCTAssertFalse(model.busy); XCTAssertEqual(model.rows.count, 1)
+        model.add([file])
+        XCTAssertFalse(model.busy) // Drops queue until installation releases its lock.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        model.endInstallation(); try await wait()
+        model.apply(); try await wait()
+        XCTAssertEqual(model.message, "Renamed 1 file.")
+        XCTAssertEqual(model.pendingCount, 0)
+        XCTAssertTrue(model.rows[0].done)
+        model.apply()
+        XCTAssertFalse(model.busy)
+    }
+
     @MainActor func testRapidAddsDuringScanAccumulateAndPreviewTiming() async throws {
         let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"]!).appendingPathComponent("rapid-add-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -257,6 +289,7 @@ final class ModelTests: XCTestCase {
         XCTAssertFalse(model.busy)
         XCTAssertEqual(model.pendingCount, 0)
         XCTAssertTrue(model.message.contains("Rename unavailable"))
+        XCTAssertFalse(model.beginInstallation())
         model.apply(); model.clear(); model.operation.text = "Y"
         XCTAssertEqual(model.pendingCount, 0)
         XCTAssertTrue(model.message.contains("Rename unavailable"))

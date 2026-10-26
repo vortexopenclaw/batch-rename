@@ -6,6 +6,8 @@ final class DownloadFixture: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "BatchRename/0.1.1 CFNetwork/Darwin")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json, application/zip, application/octet-stream")
         if request.url!.path == "/fail" { client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost)); return }
         let status = request.url!.path == "/404" ? 404 : 200
         client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)

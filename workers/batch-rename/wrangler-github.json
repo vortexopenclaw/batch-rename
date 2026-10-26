@@ -1,0 +1,7 @@
+{
+  "name": "batch-rename-updates",
+  "main": "github-updates.mjs",
+  "compatibility_date": "2026-01-01",
+  "workers_dev": true,
+  "vars": { "RELEASE_TAG": "v0.1.1-beta" }
+}

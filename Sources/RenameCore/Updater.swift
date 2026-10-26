@@ -25,7 +25,10 @@ public final class UpdateFetcher: NSObject, URLSessionTaskDelegate, @unchecked S
         configuration.timeoutIntervalForRequest = 30; configuration.timeoutIntervalForResource = 180
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         defer { session.invalidateAndCancel() }
-        let (bytes, response) = try await session.bytes(from: url)
+        var request = URLRequest(url: url)
+        request.setValue("BatchRename/0.1.1 CFNetwork/Darwin", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json, application/zip, application/octet-stream", forHTTPHeaderField: "Accept")
+        let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200, response.expectedContentLength <= limit else { throw RenameError("Update download rejected") }
         var data = Data()
         for try await byte in bytes { guard data.count < limit else { throw RenameError("Update exceeds size limit") }; data.append(byte) }

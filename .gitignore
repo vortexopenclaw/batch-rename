@@ -2,6 +2,7 @@
 .build-native/
 build/
 dist/
+dist-next/
 .DS_Store
 *.xcuserstate
 
