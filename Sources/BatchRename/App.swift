@@ -10,7 +10,7 @@ final class Cancellation: @unchecked Sendable {
     var requested: Bool { lock.lock(); defer { lock.unlock() }; return value }
 }
 struct Row: Identifiable {
-    let id = UUID()
+    var id = UUID()
     var entry: Entry
     var original: String
     var proposed: String
@@ -21,6 +21,8 @@ struct Row: Identifiable {
 }
 @MainActor final class Model: ObservableObject {
     @Published var rows: [Row] = []
+    @Published var selection = Set<UUID>()
+    private var excluded = Set<String>()
     @Published var operation = RenameOperation() { didSet { preview() } }
     @Published var files = true { didSet { rebuild() } }
     @Published var folders = false { didSet { rebuild() } }
@@ -67,7 +69,14 @@ struct Row: Identifiable {
         let panel = NSOpenPanel(); panel.canChooseFiles = true; panel.canChooseDirectories = true; panel.allowsMultipleSelection = true
         if panel.runModal() == .OK { add(panel.urls) }
     }
-    func clear() { guard !controlsLocked else { return }; rows = []; inventory.roots = []; plan = []; message = engineFailure ?? "List cleared. Description and undo history preserved." }
+    func removeSelected() {
+        guard !controlsLocked else { return }
+        excluded.formUnion(rows.filter { selection.contains($0.id) }.map { $0.entry.path })
+        rows.removeAll { selection.contains($0.id) }
+        selection = []
+        preview()
+    }
+    func clear() { guard !controlsLocked else { return }; rows = []; selection = []; excluded = []; inventory.roots = []; plan = []; message = engineFailure ?? "List cleared. Description and undo history preserved." }
     private func key(_ e: Entry) -> String { "\(e.path)|\(e.identity.device)|\(e.identity.inode)|\(e.identity.birth)|\(e.identity.nanos)" }
     private func refreshFrozen() {
         frozen = []
@@ -83,6 +92,11 @@ struct Row: Identifiable {
     func rebuild() {
         guard !controlsLocked else { rebuildPending = true; return }
         rebuildPending = false
+        // Only an explicit drop restores exclusions (including descendants of a dropped folder).
+        for url in pendingURLs {
+            let path = url.standardizedFileURL.path
+            excluded = excluded.filter { $0 != path && !$0.hasPrefix(path + "/") }
+        }
         inventory.append(pendingURLs.map(\.path))
         pendingURLs = []
         inventory.files = files; inventory.folders = folders; inventory.recursive = recursive
@@ -101,9 +115,11 @@ struct Row: Identifiable {
                     self.refreshFrozen()
                     let completed = self.rows.filter { $0.done && self.frozen.contains(self.key($0.entry)) }
                     let visible = Set(completed.map { self.key($0.entry) })
-                    self.rows = completed + entries.filter { !visible.contains(self.key($0)) }.map {
-                        Row(entry: $0, original: $0.name, proposed: $0.name, done: self.frozen.contains(self.key($0)))
+                    let previous = Dictionary(uniqueKeysWithValues: self.rows.map { (self.key($0.entry), $0.id) })
+                    self.rows = completed + entries.filter { !visible.contains(self.key($0)) && !self.excluded.contains($0.path) }.map {
+                        Row(id: previous[self.key($0)] ?? UUID(), entry: $0, original: $0.name, proposed: $0.name, done: self.frozen.contains(self.key($0)))
                     }
+                    self.selection.formIntersection(Set(self.rows.map(\.id)))
                     self.preview()
                 case .failure(let error): self.plan = []; self.message = error.localizedDescription
                 }
@@ -157,6 +173,9 @@ struct Row: Identifiable {
                 }
                 // Keep root selections in sync when folders themselves move.
                 for step in steps {
+                    self.excluded = Set(self.excluded.map { path in
+                        path == step.source ? step.destination : (path.hasPrefix(step.source + "/") ? step.destination + path.dropFirst(step.source.count) : path)
+                    })
                     self.inventory.roots = self.inventory.roots.map { path in
                         path == step.source ? step.destination : (path.hasPrefix(step.source + "/") ? step.destination + path.dropFirst(step.source.count) : path)
                     }
@@ -179,7 +198,7 @@ struct Row: Identifiable {
                 self.refreshFrozen()
                 self.busy = false; self.undoAvailable = engine.canUndo
                 switch result {
-                case .success: self.rows = []; self.inventory.roots = []; self.plan = []; self.message = "Last batch undone. Drop files to start again."
+                case .success: self.rows = []; self.selection = []; self.inventory.roots = []; self.plan = []; self.message = "Last batch undone. Drop files to start again."
                 case .failure(let error): self.message = "Undo stopped safely: \(error.localizedDescription)"
                 }
                 self.drainPending()
@@ -219,7 +238,6 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 0) {
                 ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    Label("Text", systemImage: "textformat").font(.title2.bold())
                     Picker("Action", selection: $model.operation.action) { ForEach(Action.allCases, id: \.self) { Text($0.rawValue) } }
                     if model.operation.action == .replace {
                         TextField("Find", text: $model.operation.search)
@@ -271,6 +289,7 @@ struct ContentView: View {
                     HStack {
                         Text("Preview").font(.title2.bold())
                         Text("\(model.rows.count) items").foregroundStyle(.secondary)
+                        if !model.selection.isEmpty { Text("\(model.selection.count) selected").foregroundStyle(.secondary) }
                         Spacer()
                         Button("Add Files or Folders…", action: model.choose).disabled(model.controlsLocked)
                         Button("Clear List", action: model.clear)
@@ -295,23 +314,7 @@ struct ContentView: View {
                         .background(Color(nsColor: .controlBackgroundColor))
                         .contentShape(Rectangle())
                     } else {
-                    Table(model.rows) {
-                        TableColumn("Current Name") { row in
-                            HStack(spacing: 6) {
-                                Image(systemName: row.entry.identity.link ? "link" : (row.entry.identity.folder ? "folder" : "doc")).foregroundStyle(.secondary).help(row.entry.path)
-                                FilenameView(name: row.original, ranges: row.done ? [] : row.preview?.sourceMatches ?? [], deletion: !row.done && row.preview?.deletion == true, operation: model.operation)
-                            }
-                        }
-                        TableColumn("New Name") { row in
-                            HStack(spacing: 6) {
-                                FilenameView(name: row.proposed, ranges: row.done ? [] : row.preview?.replacements ?? [], deletion: false, operation: model.operation)
-                                if row.done { Image(systemName: "checkmark").foregroundStyle(.secondary).help("Completed") }
-                                else if let error = row.error { Image(systemName: "exclamationmark.triangle").help(error).accessibilityLabel(error) }
-                                else if row.preview?.skipped == true { Image(systemName: "info.circle").foregroundStyle(.secondary).help("Already ends with this text") }
-                                else if row.preview?.deletion == true { Image(systemName: "minus.circle").foregroundStyle(.secondary).help("Text removed") }
-                            }
-                        }
-                    }
+                    PreviewTable(model: model)
                     }
                 }
             }
