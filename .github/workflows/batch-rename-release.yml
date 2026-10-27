@@ -1,50 +1,85 @@
-name: Batch Rename release
+name: Batch Rename CI and release
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing reviewed tag matching Info.plist (vX.Y.Z)
+        description: Existing reviewed tag matching Info.plist (vX.Y.Z or vX.Y.Z-beta)
         required: true
         type: string
 permissions:
   contents: read
 concurrency:
-  group: batch-rename-release
+  group: batch-rename-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.tag || github.sha }}
+          persist-credentials: false
+      - name: Prepare isolated Apple Silicon build
+        run: |
+          test "$(uname -m)" = arm64
+          mkdir -p "$RUNNER_TEMP/batch-rename-scratch"
+          printf 'BATCH_RENAME_SCRATCH=%s\n' "$RUNNER_TEMP/batch-rename-scratch" >> "$GITHUB_ENV"
+      - name: App and native preview tests
+        run: bash scripts/test-direct.sh
+      - name: Package and verify rename and undo
+        run: |
+          bash scripts/package.sh --direct
+          source scripts/env.sh
+          "build/Batch Rename.app/Contents/MacOS/BatchRename" --verify
+          codesign --verify --deep --strict 'build/Batch Rename.app'
+      - name: Update archive, publisher, and Worker tests
+        run: |
+          bash scripts/test-update-bundle.sh
+          python3 scripts/test-publish-update.py
+          node --test workers/batch-rename/*.test.mjs
   release:
-    # Parent provisions a dedicated, ephemeral Apple Silicon runner with Xcode at /Applications/Xcode.app.
-    runs-on: [self-hosted, macOS, ARM64, batch-rename-release]
+    if: github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: macos-15
+    timeout-minutes: 20
     environment: batch-rename-release
+    concurrency:
+      group: batch-rename-release
+      cancel-in-progress: false
     permissions:
       contents: write
     env:
-      BATCH_RENAME_SCRATCH: ${{ runner.temp }}/batch-rename-scratch
       RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ inputs.tag }}
           persist-credentials: false
+      - name: Prepare isolated release build
+        run: |
+          test "$(uname -m)" = arm64
+          mkdir -p "$RUNNER_TEMP/batch-rename-scratch"
+          printf 'BATCH_RENAME_SCRATCH=%s\n' "$RUNNER_TEMP/batch-rename-scratch" >> "$GITHUB_ENV"
       - name: Validate scope and public configuration
         run: |
-          mkdir -p "$BATCH_RENAME_SCRATCH"
           python3 - <<'PY'
           import os, plistlib, json, re
           tag = os.environ['RELEASE_TAG']
-          assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag)
+          assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+(?:-beta)?', tag)
           info = plistlib.load(open('Resources/Info.plist', 'rb'))
-          assert tag == 'v' + info['CFBundleShortVersionString']
+          assert tag.removesuffix('-beta') == 'v' + info['CFBundleShortVersionString']
           assert info['CFBundleIdentifier'] == 'com.vortexopenclaw.batch-rename'
           json.load(open('Resources/UpdateConfiguration.json'))
           PY
-      - name: Test and package ad-hoc signed app
+      - name: Package ad-hoc signed app
         run: |
-          bash scripts/test-direct.sh
           bash scripts/package.sh --direct
           source scripts/env.sh
           "build/Batch Rename.app/Contents/MacOS/BatchRename" --verify
-          bash scripts/test-update-bundle.sh
           python3 scripts/release-update.py 'build/Batch Rename.app' build/release
           swiftc -I build -L build -lRenameCore -Xlinker -rpath -Xlinker "$PWD/build" scripts/sign-update.swift -o build/sign-update
           swiftc -I build -L build -lRenameCore -Xlinker -rpath -Xlinker "$PWD/build" scripts/verify-release.swift -o build/verify-release
@@ -61,4 +96,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "$RELEASE_TAG" --verify-tag --draft --title "Batch Rename $RELEASE_TAG" --notes 'Ad-hoc signed Apple Silicon build. See repository distribution and recovery instructions.' build/release/*.zip build/release/manifest.json
+          prerelease=()
+          if [[ "$RELEASE_TAG" == *-beta ]]; then prerelease+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" --verify-tag --draft "${prerelease[@]}" --title "Batch Rename $RELEASE_TAG" --notes 'Ad-hoc signed Apple Silicon build. See repository distribution and recovery instructions.' build/release/*.zip build/release/manifest.json
