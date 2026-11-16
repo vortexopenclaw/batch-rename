@@ -120,18 +120,36 @@ public struct Entry: Identifiable, Equatable, Sendable {
         guard identity != parent, identity.device == parent.device else { throw RenameError("Volume roots are not allowed.") }
     }
 }
+// A directory entry is a parent plus a name, not an inode: hardlinks remain distinct.
+private func locationKey(_ entry: Entry) throws -> String {
+    guard let name = try URL(fileURLWithPath: entry.path).resourceValues(forKeys: [.nameKey]).name else {
+        throw RenameError("Cannot determine directory entry name: \(entry.path)")
+    }
+    // Ask the filesystem for the actual spelling rather than guessing its case
+    // or Unicode comparison policy. Byte encoding preserves distinct hardlinks.
+    return "\(entry.parent.device)|\(entry.parent.inode)|\(entry.parent.birth)|\(entry.parent.nanos)|\(Data(name.utf8).base64EncodedString())"
+}
 public struct Inventory: Sendable {
     public var roots: [String] = []
     public var files = true, folders = false, recursive = false
     public init() {}
     public mutating func append(_ paths: [String]) { for p in paths { let p = URL(fileURLWithPath: p).standardizedFileURL.path; if !roots.contains(p) { roots.append(p) } } }
+    public mutating func removeRoots(matching entries: [Entry]) {
+        let paths = Set(entries.map(\.path))
+        let keys = Set(entries.compactMap { try? locationKey($0) })
+        roots.removeAll { path in
+            if paths.contains(path) { return true }
+            guard let entry = try? Entry(path), let key = try? locationKey(entry) else { return false }
+            return keys.contains(key)
+        }
+    }
     public func scan() throws -> [Entry] {
         var result: [Entry] = [], seen = Set<String>()
         func visit(_ path: String, explicit: Bool, device: Int32?) throws {
             let e = try Entry(path)
             if let device, e.identity.device != device { return }
             if !explicit && e.name.hasPrefix(".") { return }
-            let newlySeen = seen.insert(path).inserted
+            let newlySeen = seen.insert(try locationKey(e)).inserted
             if !newlySeen && !explicit { return }
             if newlySeen && (e.identity.folder ? folders : files) { result.append(e) }
             guard e.identity.folder else { return }
@@ -144,7 +162,10 @@ public struct Inventory: Sendable {
                     let ci = try Identity.read(child)
                     if ci.device != e.identity.device { continue }
                     if ci.folder && !recursive {
-                        if folders, seen.insert(child).inserted { result.append(try Entry(child)) }
+                        if folders {
+                            let entry = try Entry(child)
+                            if seen.insert(try locationKey(entry)).inserted { result.append(entry) }
+                        }
                     } else { try visit(child, explicit: false, device: e.identity.device) }
                 }
             }
@@ -325,6 +346,20 @@ public final class Engine {
         journal.steps[journal.steps.count - 1].done = true; try save()
     }
     public func apply(_ plan: [PlanItem], cancelled: () -> Bool = { false }, beforeMove: ((PlanItem) throws -> Void)? = nil) throws {
+        // Preflight the whole batch: moving this storage (or any ancestor) would
+        // detach the journal/lock after an earlier rename had already succeeded.
+        func storageKey(_ path: String) -> String {
+            URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path.precomposedStringWithCanonicalMapping.lowercased()
+        }
+        let storage = [storageKey(journalURL.path), storageKey(journalURL.path + ".lock")]
+        for item in plan {
+            for path in [item.entry.path, item.destination] {
+                let key = storageKey(path)
+                guard !storage.contains(where: { $0 == key || $0.hasPrefix(key + "/") }) else {
+                    throw RenameError("Cannot rename undo storage or a directory containing it.")
+                }
+            }
+        }
         try reconcile()
         let batch = UUID()
         for item in plan {

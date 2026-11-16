@@ -1,6 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import worker from './worker.mjs';
+test('malformed metadata is rejected on both routes before asset access', async () => {
+  for (const text of ['{broken', 'null', '[]', 'true', '42', '"release"', '{}', '{"assetKey":null}', '{"assetKey":["batch-rename/releases/test.zip"]}', '{"assetKey":"other/secret"}']) {
+    for (const route of ['manifest.json', 'download']) for (const method of ['GET', 'HEAD']) {
+      const calls = [];
+      const bad = { RELEASES: { async get(key) { calls.push(key); return { text: async () => text }; } } };
+      const response = await worker.fetch(new Request('https://example.invalid/batch-rename/' + route, { method }), bad);
+      assert.equal(response.status, 503, `${method} ${route}: ${text}`);
+      assert.deepEqual(calls, ['batch-rename/manifest.json']);
+    }
+  }
+});
 const manifest = JSON.stringify({ assetKey: 'batch-rename/releases/test.zip' });
 const env = { ROUTE_PREFIX: '/batch-rename', RELEASES: { async get(key) { return key === 'batch-rename/manifest.json' ? { text: async () => manifest } : key === 'batch-rename/releases/test.zip' ? { body: 'zip', size: 3 } : null; } } };
 test('serves only scoped manifest and archive', async () => {

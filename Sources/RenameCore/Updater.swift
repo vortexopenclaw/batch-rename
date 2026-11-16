@@ -83,6 +83,13 @@ public enum UpdateArchive {
 }
 
 public enum UpdateInstaller {
+    static func minimumMacOS(_ value: Any?) -> String? {
+        guard let text = value as? String else { return nil }
+        let count = text.split(separator: ".", omittingEmptySubsequences: false).count
+        guard count == 2 || count == 3,
+              let parts = UpdatePolicy.version(count == 2 ? text + ".0" : text) else { return nil }
+        return parts.map(String.init).joined(separator: ".")
+    }
     public static func run(_ executable: String, _ arguments: [String]) throws {
         let process = Process(); process.executableURL = URL(fileURLWithPath: executable); process.arguments = arguments
         try process.run(); process.waitUntilExit()
@@ -95,6 +102,9 @@ public enum UpdateInstaller {
               dict["CFBundleShortVersionString"] as? String == manifest.version,
               dict["CFBundleVersion"] as? String == manifest.build,
               dict["CFBundleExecutable"] as? String == "BatchRename" else { throw RenameError("Update bundle identity mismatch") }
+        guard let minimum = minimumMacOS(dict["LSMinimumSystemVersion"]),
+              let required = UpdatePolicy.version(manifest.minimumMacOS),
+              minimum == required.map(String.init).joined(separator: ".") else { throw RenameError("Update bundle compatibility mismatch") }
         try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])
     }
     public static func physical(_ url: URL) throws {

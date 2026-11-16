@@ -15,7 +15,8 @@ export default {
     if (new TextEncoder().encode(text).length > 65536) return new Response('Invalid release', { status: 503 });
     let manifest;
     try { manifest = JSON.parse(text); } catch { return new Response('Invalid release', { status: 503 }); }
-    const match = /^batch-rename\/releases\/(batch-rename-[A-Za-z0-9_-]+\.zip)$/.exec(manifest.assetKey || '');
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) || typeof manifest.assetKey !== 'string' || typeof manifest.downloadURL !== 'string') return new Response('Invalid release', { status: 503 });
+    const match = /^batch-rename\/releases\/(batch-rename-[A-Za-z0-9_-]+\.zip)$/.exec(manifest.assetKey);
     if (!match || manifest.downloadURL !== `${url.origin}${prefix}/download`) return new Response('Invalid release', { status: 503 });
     const common = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
     if (url.pathname.endsWith('/manifest.json')) return new Response(request.method === 'HEAD' ? null : text, { headers: { ...common, 'Content-Type': 'application/json' } });

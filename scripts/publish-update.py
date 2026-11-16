@@ -30,11 +30,24 @@ def publish(bucket, config, asset_key, asset, manifest):
         return True
 
     with tempfile.TemporaryDirectory(prefix='batch-rename-publish-') as directory:
+        # Snapshot caller inputs before remote work so a concurrent local rebuild
+        # cannot change the bytes after content-address validation.
+        local_asset = pathlib.Path(directory) / 'local-archive'
+        local_manifest = pathlib.Path(directory) / 'local-manifest'
+        local_asset.write_bytes(asset.read_bytes())
+        local_manifest.write_bytes(manifest.read_bytes())
+        asset, manifest = local_asset, local_manifest
+        archive_digest = digest(asset)
         remote = pathlib.Path(directory) / 'archive'
         if read(asset_key, remote, missing_ok=True):
-            if digest(remote) != digest(asset):
+            if digest(remote) != archive_digest:
                 raise RuntimeError('Immutable release key already contains different bytes')
         else:
+            # Wrangler has no atomic create-only PUT here. Full content addressing
+            # prevents supported concurrent publishers from giving one key
+            # different bytes. Legacy keys may be verified, but never created.
+            if not asset_key.endswith('-' + archive_digest + '.zip'):
+                raise RuntimeError('New archives require a full SHA-256 content-addressed release key')
             subprocess.run(command('put', asset_key, asset), check=True)
         # Verify the exact object before making the manifest visible, including retries.
         remote.unlink(missing_ok=True)
@@ -67,7 +80,7 @@ def main():
     if args.publish:
         publish(bucket, config_path, m['assetKey'], asset, manifest)
     else:
-        print('Plan: check immutable archive, upload only if missing, verify archive readback, publish and verify manifest. No remote calls made.')
+        print('Plan: check archive, require full SHA-256 addressing for new uploads, verify archive readback, publish and verify manifest. No remote calls made.')
 
 
 if __name__ == '__main__':

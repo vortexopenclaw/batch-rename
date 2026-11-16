@@ -16,6 +16,24 @@ final class DownloadFixture: URLProtocol {
     override func stopLoading() {}
 }
 final class UpdaterTests: XCTestCase {
+    func testBundleMinimumNormalization() {
+        XCTAssertEqual(UpdateInstaller.minimumMacOS("14.0"), "14.0.0")
+        XCTAssertEqual(UpdateInstaller.minimumMacOS("15.2.1"), "15.2.1")
+        XCTAssertNil(UpdateInstaller.minimumMacOS("999999999999999999999999.0"))
+    }
+    func testBundleRejectsMissingMalformedOrMismatchedMinimumBeforeCodesign() throws {
+        let app = try root().appendingPathComponent("Candidate.app")
+        try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        let manifest = UpdateManifest(bundleIdentifier: "com.vortexopenclaw.batch-rename", version: "0.2.0", build: "2", assetKey: "batch-rename/releases/test.zip", downloadURL: URL(string: "https://example.invalid/download")!, sha256: String(repeating: "0", count: 64), minimumMacOS: "14.0.0")
+        for minimum: Any? in [nil, "", "14", "14.", "14..0", "14.0.0.1", "14.0-beta", " 14.0", "14.0\n", "１４.０", 14, true, "15.0"] {
+            var info: [String: Any] = ["CFBundleIdentifier": manifest.bundleIdentifier, "CFBundleShortVersionString": manifest.version, "CFBundleVersion": manifest.build, "CFBundleExecutable": "BatchRename"]
+            info["LSMinimumSystemVersion"] = minimum
+            try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: app.appendingPathComponent("Contents/Info.plist"))
+            XCTAssertThrowsError(try UpdateInstaller.validateBundle(app, manifest: manifest)) { error in
+                XCTAssertEqual(error.localizedDescription, "Update bundle compatibility mismatch", "minimum: \(String(describing: minimum))")
+            }
+        }
+    }
     func root() throws -> URL {
         let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"]!).appendingPathComponent("updater-test-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)

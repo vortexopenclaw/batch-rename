@@ -1,0 +1,36 @@
+{
+  "include": ["Tests/**/*.swift", "scripts/test-*", "workers/**/*.test.mjs", "Resources/**/*.plist", "README.md", "docs/**/*.md"],
+  "exclude": [".build/**", ".build-native/**", "build/**", "dist/**", "dist-next/**", "dist-next-*/**", "release-assets/**", ".env", ".env.*", "**/*.pem", "**/*.key", "BUILD-BRIEF.md", "SAFETY-REVIEW.md", "VERIFICATION.md"],
+  "rules": [
+    {
+      "path": "{Tests/**,scripts/test-*,workers/**/*.test.mjs}",
+      "merge_system_rule": true,
+      "rule": "Batch Rename regression tests: check that assertions exercise production code and observable behavior, not a duplicate implementation. Preserve negative controls and failure-path assertions for exclusive renames, durable undo, identity changes, symlink rejection, completed-row state, Unicode layout, update authentication, and archive validation where relevant. Mocks must not erase the filesystem or lifecycle behavior being claimed. Keep headless tests free of GUI launches, installers, permission dialogs, real credentials, publishing, and user-file mutations. Use isolated writable scratch fixtures, never system /tmp. Distinguish headless evidence from interactive acceptance. Report concrete defects, not stylistic preferences."
+    },
+    {
+      "path": "Sources/RenameCore/Core.swift",
+      "merge_system_rule": true,
+      "rule": "Batch Rename operates on user files. Prioritize data loss and recovery: never overwrite occupied destinations, preserve distinct hardlinks, reject symlink ancestors and volume roots, and do not follow symlinks. Trace source and parent identities through the actual exclusive rename syscall and post-move verification. Destination exclusivity does not make source identity checking atomic. Inspect durable journal ordering, fsync failures, interrupted operations, rejected undo followed by reload, partial batches, and descendant path remapping after ancestor moves. Preview and execution must agree on literal matching, extension spelling, filename limits, Unicode, case-only renames, and collision handling. Require reproductions for suspected defects and report unavoidable namespace limitations honestly."
+    },
+    {
+      "path": "Sources/RenameCore/{Updater,UpdatePolicy}.swift",
+      "merge_system_rule": true,
+      "rule": "Batch Rename updater: trace authenticated manifest verification and archive digest checks before installation. Reject untrusted redirects, invalid identities or versions, excessive downloads, archive path traversal, symlinks, duplicate normalized paths, and unsupported ZIP features. Review exclusive filesystem moves, private staging, backup preservation, failed launch recovery, interrupted installation, and acknowledgment handling together with AppUpdater.swift and publisher scripts. Never silently discard a backup or overwrite another app. Do not equate ad-hoc codesign verification with publisher authentication or Gatekeeper acceptance."
+    },
+    {
+      "path": "Sources/BatchRename/AppUpdater.swift",
+      "merge_system_rule": true,
+      "rule": "Batch Rename update orchestration: follow the core updater and update policy, not just this file. Installation must wait for file operations to finish and require a healthy rename engine. Block all new scan, rename, undo, and inventory mutation paths while installation owns the app. Verify cancellation and failure restore truthful usable state without losing undo history. Startup update checks stay silent when offline or current; manual checks report errors. Do not claim live installation, relaunch, or Gatekeeper acceptance from headless tests."
+    },
+    {
+      "path": "Sources/{BatchRename/**,RenameCore/Presentation.swift}",
+      "merge_system_rule": true,
+      "rule": "Batch Rename UI and model: preview must match the exact operation executed. Completed entries stay frozen even after clearing the inventory, rescanning, changing Process options, or renaming an ancestor. Removing rows changes only inventory, preserves undo and typed settings, and maintains exclusions until explicit re-addition. Engine initialization failures must visibly disable file mutation. Check main-actor confinement, stale asynchronous scan results, operation/install exclusion, selection shortcuts versus text editing, and composed-character-safe UTF-16 highlight ranges. Essential filename changes must remain discoverable at narrow widths with accessible full names. Count selected entries rather than internal rename steps. Report reproducible behavior defects, not cosmetic nits."
+    },
+    {
+      "path": "{scripts/**,workers/**,.github/**,Resources/**,Package.swift}",
+      "merge_system_rule": true,
+      "rule": "Batch Rename distribution: preserve least-privilege release permissions and explicit draft-release approval. Never log or embed private signing keys, API tokens, or local runtime configuration. Trace signed manifest bytes, archive hashes, version/build identity, immutable release inputs, and publisher/Worker routing together. Serve only intended validated release assets and reject untrusted request destinations. Keep headless checks separate from explicitly authorized GUI installation. Packaging must not overwrite an app in use. Preserve pinned CI actions and keep review tooling advisory, not an automatic publishing or release-approval path."
+    }
+  ]
+}

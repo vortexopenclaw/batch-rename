@@ -17,6 +17,57 @@ final class CoreTests: XCTestCase {
     }
     func engine() throws -> Engine { try Engine(journalURL: root.appendingPathComponent("journal/undo.json")) }
     func operation(_ text: String = " edited") -> RenameOperation { var o = RenameOperation(); o.text = text; return o }
+    func testEngineRejectsRenamingItsJournalStorageBeforeAnyMutation() throws {
+        let e = try engine()
+        let a = try file("a.txt")
+        try e.apply(Planner.plan([Entry(a)], operation: operation("X")))
+        let journal = root.appendingPathComponent("journal/undo.json")
+        let original = try Data(contentsOf: journal)
+        let untouched = try file("before.txt")
+        for path in [root.appendingPathComponent("journal").path, journal.path, journal.path + ".lock"] {
+            let plan = try Planner.plan([Entry(untouched), Entry(path)], operation: operation("Y"))
+            XCTAssertThrowsError(try e.apply(plan))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: untouched))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+            XCTAssertEqual(try Data(contentsOf: journal), original)
+            XCTAssertThrowsError(try engine())
+        }
+        // A destination containing engine storage is forbidden too, even for a caller-built plan.
+        let directory = root.appendingPathComponent("other")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        XCTAssertThrowsError(try e.apply([PlanItem(entry: Entry(directory.path), destination: root.appendingPathComponent("JOURNAL").path)]))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
+        try e.undo()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: a))
+    }
+
+    func testCaseAliasesDeduplicateWithoutMergingHardlinks() throws {
+        let a = try file("clip.txt")
+        let alias = root.appendingPathComponent("CLIP.txt").path
+        guard let id = try? Identity.read(alias), id == (try Identity.read(a)) else {
+            throw XCTSkip("Requires a case-insensitive scratch filesystem")
+        }
+        let hard = root.appendingPathComponent("hard.txt").path
+        try FileManager.default.linkItem(atPath: a, toPath: hard)
+        var inv = Inventory(); inv.append([a, alias, hard])
+        let entries = try inv.scan()
+        XCTAssertEqual(entries.count, 2)
+        XCTAssertEqual(try Planner.plan(entries, operation: operation("X")).count, 2)
+        let e = try engine()
+        try e.apply(Planner.plan(entries, operation: operation("X")))
+        try e.undo()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: a))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: hard))
+    }
+
+    func testDistinctCaseSensitiveEntriesArePreserved() throws {
+        let sensitive = try root.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey]).volumeSupportsCaseSensitiveNames
+        guard sensitive == true else { throw XCTSkip("Requires a case-sensitive scratch filesystem") }
+        let a = try file("clip.txt"), b = try file("CLIP.txt")
+        var inv = Inventory(); inv.append([a, b])
+        XCTAssertEqual(try inv.scan().count, 2)
+    }
+
     func testNaming() throws {
         let op = operation()
         for (input, expected) in [("a.jpg", "a edited.jpg"), ("archive.tar.gz", "archive.tar edited.gz"), (".gitignore", ".gitignore edited"), ("plain", "plain edited"), ("🚘e\u{301}.mp4", "🚘e\u{301} edited.mp4"), ("a.", "a edited.")] {

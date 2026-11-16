@@ -71,7 +71,9 @@ struct Row: Identifiable {
     }
     func removeSelected() {
         guard !controlsLocked else { return }
-        excluded.formUnion(rows.filter { selection.contains($0.id) }.map { $0.entry.path })
+        let entries = rows.filter { selection.contains($0.id) }.map(\.entry)
+        excluded.formUnion(entries.map(\.path))
+        inventory.removeRoots(matching: entries)
         rows.removeAll { selection.contains($0.id) }
         selection = []
         preview()
@@ -193,13 +195,19 @@ struct Row: Identifiable {
     func undo() {
         guard !controlsLocked, let engine else { return }; busy = true
         worker.async {
+            let previous = engine.steps
             let result = Result { try engine.undo() }
+            let progressed = zip(previous, engine.steps).contains { !$0.0.undone && $0.1.undone }
             DispatchQueue.main.async {
                 self.refreshFrozen()
                 self.busy = false; self.undoAvailable = engine.canUndo
                 switch result {
-                case .success: self.rows = []; self.selection = []; self.inventory.roots = []; self.plan = []; self.message = "Last batch undone. Drop files to start again."
-                case .failure(let error): self.message = "Undo stopped safely: \(error.localizedDescription)"
+                case .success: self.clear(); self.message = "Last batch undone. Drop files to start again."
+                case .failure(let error):
+                    // An ancestor may already have been restored before a child was rejected.
+                    // Drop stale paths without discarding undo history or queued additions.
+                    if progressed { self.clear() }
+                    self.message = "Undo stopped safely: \(error.localizedDescription)"
                 }
                 self.drainPending()
             }
@@ -255,7 +263,6 @@ struct ContentView: View {
                             TextField("Enter text", text: $model.operation.text)
                             Button { model.operation.text = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.borderless).help("Clear description only").accessibilityLabel("Clear description")
                         }
-                        Text("No separator is added. Include a leading space if you want one.").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Change").font(.headline)
@@ -293,7 +300,7 @@ struct ContentView: View {
                         Spacer()
                         Button("Add Files or Folders…", action: model.choose).disabled(model.controlsLocked)
                         Button("Clear List", action: model.clear)
-                            .disabled(model.controlsLocked || model.rows.isEmpty)
+                            .disabled(model.controlsLocked)
                             .help("Removes entries from this window only; preserves text and undo")
                     }.padding(20)
                     if model.rows.isEmpty {

@@ -1,4 +1,4 @@
-# Batch Rename 0.1.2 (build 3)
+# Batch Rename 0.1.3 (build 4)
 
 A native macOS utility for renaming files and folders locally, with a live preview and durable undo. Requires macOS 14 or later and Apple Silicon.
 
@@ -24,6 +24,7 @@ mkdir -p "$BATCH_RENAME_SCRATCH"
 source scripts/env.sh
 bash scripts/test-direct.sh
 python3 scripts/test-publish-update.py
+python3 scripts/test-release-update.py
 node --test workers/batch-rename/worker.test.mjs
 ```
 
@@ -44,6 +45,10 @@ The updater implements authenticated manifests, archive validation, staged insta
 The GUI lifecycle harness is disabled by default. Its `--allow-gui-lifecycle` flag explicitly enables app and installer launches and requires separate interactive authorization. Do not run it during headless testing. Changing app signatures can cause macOS to request file access again.
 
 Further acceptance work includes interactive drops and accessibility, external-media failure cases, exhaustive crash boundaries, and very large inventories or long undo histories. Preview validation currently runs on the main actor.
+
+## Advisory code review
+
+[Code review setup and pilot results](docs/CODE-REVIEW.md) describe the optional OpenCodeReview delegation workflow. It uses repository-local safety rules and the existing coding agent, without adding an app dependency or changing release gates.
 
 ## License
 

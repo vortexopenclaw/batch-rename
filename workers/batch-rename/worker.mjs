@@ -7,10 +7,10 @@ export default {
     const latest = await env.RELEASES.get('batch-rename/manifest.json');
     if (!latest) return new Response('No release', { status: 404 });
     const text = await latest.text();
-    if (url.pathname.endsWith('/manifest.json')) return new Response(request.method === 'HEAD' ? null : text, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
     let manifest;
     try { manifest = JSON.parse(text); } catch { return new Response('Invalid release', { status: 503 }); }
-    if (!/^batch-rename\/releases\/[A-Za-z0-9_-]+\.zip$/.test(manifest.assetKey)) return new Response('Invalid asset', { status: 503 });
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) || typeof manifest.assetKey !== 'string' || !/^batch-rename\/releases\/[A-Za-z0-9_-]+\.zip$/.test(manifest.assetKey)) return new Response('Invalid asset', { status: 503 });
+    if (url.pathname.endsWith('/manifest.json')) return new Response(request.method === 'HEAD' ? null : text, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
     const asset = await env.RELEASES.get(manifest.assetKey);
     if (!asset) return new Response('No asset', { status: 404 });
     return new Response(request.method === 'HEAD' ? null : asset.body, { headers: { 'Content-Type': 'application/zip', 'Content-Length': String(asset.size), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });

@@ -3,6 +3,74 @@ import XCTest
 import Foundation
 
 final class ModelTests: XCTestCase {
+    @MainActor func waitForModel(_ model: Model) async throws {
+        for _ in 0..<500 {
+            if !model.busy { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("Model did not finish")
+    }
+
+    @MainActor func testRemovedExplicitRootDoesNotBlockFreshDrops() async throws {
+        let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"]!).appendingPathComponent("removed-root-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let a = root.appendingPathComponent("a.txt"), b = root.appendingPathComponent("b.txt")
+        try Data("a".utf8).write(to: a); try Data("b".utf8).write(to: b)
+        let model = Model(journalURL: root.appendingPathComponent("journal/undo.json"))
+        model.operation.text = "X"; model.add([a]); try await waitForModel(model)
+        let alias = root.appendingPathComponent("A.txt")
+        if FileManager.default.fileExists(atPath: alias.path) {
+            model.add([alias]); try await waitForModel(model)
+            XCTAssertEqual(model.rows.count, 1)
+        }
+        model.selection = Set(model.rows.map(\.id)); model.removeSelected()
+        try FileManager.default.removeItem(at: a)
+        model.add([b]); try await waitForModel(model)
+        XCTAssertEqual(model.rows.map { $0.entry.path }, [b.path])
+        XCTAssertEqual(model.pendingCount, 1)
+        XCTAssertEqual(model.operation.text, "X")
+        XCTAssertEqual(try Data(contentsOf: b), Data("b".utf8))
+    }
+
+    @MainActor func testPartialUndoClearsStaleRootsAndAcceptsFreshDrops() async throws {
+        let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"]!).appendingPathComponent("partial-undo-" + UUID().uuidString)
+        let parent = root.appendingPathComponent("parent")
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("child".utf8).write(to: parent.appendingPathComponent("child.txt"))
+        let b = root.appendingPathComponent("fresh.txt")
+        try Data("fresh".utf8).write(to: b)
+        let model = Model(journalURL: root.appendingPathComponent("journal/undo.json"))
+        model.folders = true; try await waitForModel(model)
+        model.operation.text = "X"; model.add([parent]); try await waitForModel(model)
+        model.apply(); try await waitForModel(model)
+        let renamed = root.appendingPathComponent("parentX/childX.txt")
+        let handle = try FileHandle(forWritingTo: renamed)
+        try handle.write(contentsOf: Data("modified child".utf8)); try handle.close()
+        model.undo(); model.add([b]); try await waitForModel(model)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: parent.appendingPathComponent("childX.txt").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("parentX").path))
+        XCTAssertTrue(model.rows.contains { $0.entry.path == b.path })
+        XCTAssertFalse(model.rows.contains { $0.entry.path.hasPrefix(root.appendingPathComponent("parentX").path) })
+        XCTAssertTrue(model.undoAvailable)
+        XCTAssertEqual(model.operation.text, "X")
+    }
+
+    @MainActor func testEmptyInventoryCanBeClearedAfterFailedDrop() async throws {
+        let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"]!).appendingPathComponent("empty-clear-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let b = root.appendingPathComponent("b.txt")
+        try Data("b".utf8).write(to: b)
+        let model = Model(journalURL: root.appendingPathComponent("journal/undo.json"))
+        model.add([root.appendingPathComponent("missing.txt")]); try await waitForModel(model)
+        XCTAssertTrue(model.rows.isEmpty)
+        // Clear List must remain available even when a failed scan produced no rows.
+        model.clear(); model.add([b]); try await waitForModel(model)
+        XCTAssertEqual(model.rows.map { $0.entry.path }, [b.path])
+    }
+
     @MainActor func testCaseHopCountsOneEntryAndInstallationBlocksOperations() async throws {
         let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"]!).appendingPathComponent("count-lock-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

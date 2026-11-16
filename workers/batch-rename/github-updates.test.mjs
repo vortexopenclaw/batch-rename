@@ -1,6 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from './github-updates.mjs';
+test('malformed metadata is rejected on both routes without archive access', async () => {
+ const original = globalThis.fetch;
+ try {
+  for (const text of ['{broken', 'null', '[]', 'true', '42', '"release"', '{}', JSON.stringify({ ...manifest, assetKey: [manifest.assetKey] }), JSON.stringify({ ...manifest, downloadURL: null })]) {
+   for (const route of ['manifest.json', 'download']) for (const method of ['GET', 'HEAD']) {
+    const calls = [];
+    globalThis.fetch = async url => { calls.push(url); return new Response(text); };
+    const response = await worker.fetch(new Request(origin + '/batch-rename/' + route, { method }), env);
+    assert.equal(response.status, 503, `${method} ${route}: ${text}`);
+    assert.equal(calls.length, 1);
+   }
+  }
+ } finally { globalThis.fetch = original; }
+});
 const origin = 'https://batch-rename-updates.vortexradar.workers.dev';
 const env = { RELEASE_TAG: 'v0.1.1-beta' };
 const manifest = { assetKey: 'batch-rename/releases/batch-rename-0_1_1-2.zip', downloadURL: origin + '/batch-rename/download', signature: 'fixture' };

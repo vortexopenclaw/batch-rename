@@ -11,6 +11,8 @@ The dedicated `batch-rename-updates` Cloudflare Worker uses `github-updates.mjs`
 
 Only the configured release tag is served. Query strings, arbitrary routes, unsafe asset keys, and write methods are rejected. Release archives must be immutable. Publish and verify the new GitHub release assets before advancing `RELEASE_TAG`.
 
+Newly generated archive filenames include the full SHA-256 of their bytes. The legacy R2 publisher requires this content address before creating an archive, so supported concurrent publishers cannot write different bytes under one key. It can verify and reuse an existing legacy key but refuses to create one. This is not a storage-level write-once policy, and does not stop out-of-band writers with storage credentials. GitHub-backed delivery remains the production path.
+
 ## Release sequence
 
 1. Run the headless tests and package to a separate output if the working app is running.

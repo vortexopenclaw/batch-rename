@@ -40,6 +40,7 @@ jobs:
         run: |
           bash scripts/test-update-bundle.sh
           python3 scripts/test-publish-update.py
+          python3 scripts/test-release-update.py
           node --test workers/batch-rename/*.test.mjs
   release:
     if: github.event_name == 'workflow_dispatch'
