@@ -157,10 +157,11 @@ struct Row: Identifiable {
         busy = true
         cancellation.set(false)
         let token = cancellation
-        let plan = plan, start = engine.steps.count
+        let plan = plan, before = Set(engine.steps.map(\.id))
         worker.async {
             let result = Result { try engine.apply(plan, cancelled: { token.requested }) }
-            let steps = Array(engine.steps.dropFirst(start)).filter { $0.done && !$0.undone }
+            // Compaction can prune old batches, so identify this batch by step id.
+            let steps = engine.steps.filter { !before.contains($0.id) && $0.done && !$0.undone }
             let completed = plan.filter { item in steps.contains { $0.destination == item.destination } }
             let completedFolders = completed.filter { $0.entry.identity.folder }.count
             let completion = RenamePresentation.completion(files: completed.count - completedFolders, folders: completedFolders)
@@ -202,7 +203,9 @@ struct Row: Identifiable {
         worker.async {
             let previous = engine.steps
             let result = Result { try engine.undo() }
-            let progressed = zip(previous, engine.steps).contains { !$0.0.undone && $0.1.undone }
+            // Fully undone batches are pruned from the journal; a missing step was undone.
+            let after = Dictionary(engine.steps.map { ($0.id, $0.undone) }, uniquingKeysWith: { a, _ in a })
+            let progressed = previous.contains { !$0.undone && (after[$0.id] ?? true) }
             DispatchQueue.main.async {
                 self.refreshFrozen()
                 self.busy = false; self.undoAvailable = engine.canUndo
