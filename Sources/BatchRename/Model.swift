@@ -113,6 +113,8 @@ struct Row: Identifiable {
     // MARK: Operation state
 
     @Published private(set) var state: OperationState = .idle
+    /// The table's inline New Name editor is open; Rename waits until it closes.
+    @Published var inlineEditing = false
     /// A file operation (scan, rename, or undo) is running. Installation is separate.
     var busy: Bool { state == .scanning || state == .applying || state == .undoing }
     var installing: Bool { state == .installing }
@@ -139,7 +141,7 @@ struct Row: Identifiable {
     private var previewPending = false
     /// No file operation is running and the current preview has been validated.
     var isIdle: Bool { state == .idle && (engine == nil || validatedGeneration == generation) }
-    var canRename: Bool { state == .idle && engine != nil && validatedGeneration == generation && !plan.isEmpty }
+    var canRename: Bool { state == .idle && !inlineEditing && engine != nil && validatedGeneration == generation && !plan.isEmpty }
     /// Valid renames once validated; until then, the proposed changes.
     var pendingCount: Int { validatedGeneration == generation ? plan.count : proposalCount }
     var renameTitle: String { ModelText.renameTitle(pendingCount) }
@@ -256,6 +258,7 @@ struct Row: Identifiable {
         plan = []; proposalCount = 0
         generation += 1; validatedGeneration = generation
         notes = []; outcome = ModelText.clearedList
+        inlineEditing = false
         message = engineFailure ?? ModelText.clearedList
     }
     private func resetNotes() { notes = []; outcome = nil }

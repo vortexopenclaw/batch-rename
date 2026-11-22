@@ -225,6 +225,8 @@ struct PreviewTable: NSViewRepresentable {
         scroll.documentView = table
         return scroll
     }
+    /// The list can empty while the editor is open; never leave Rename waiting on it.
+    static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) { coordinator.endEditing(commit: false) }
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         Self.sync(scroll.documentView as! PreviewNativeTable, coordinator: context.coordinator, model: model)
     }
@@ -295,6 +297,7 @@ struct PreviewTable: NSViewRepresentable {
             field.setAccessibilityLabel(String(localized: "New Name"))
             field.delegate = self
             editor = field; editingID = rows[index].id; editingStart = field.stringValue
+            model.inlineEditing = true
             table.addSubview(field)
             table.scrollRowToVisible(index)
             if table.window?.makeFirstResponder(field) == true, let text = field.currentEditor() {
@@ -306,6 +309,7 @@ struct PreviewTable: NSViewRepresentable {
         func endEditing(commit: Bool) {
             guard let field = editor, let id = editingID else { return }
             editor = nil; editingID = nil
+            if model.inlineEditing { model.inlineEditing = false }
             let text = field.stringValue
             let table = field.superview as? NSTableView
             field.removeFromSuperview()

@@ -188,5 +188,30 @@ final class UIBugTests: ScratchTestCase {
         model.setOverride(frontID, to: "2026_1024_222430_004409F rain, T340.MP4"); try await waitForIdle(model)
         XCTAssertEqual(rear().proposed, "2026_1024_222430_004409R rain, T340.MP4")
     }
+
+    // Rename is unavailable (button and Cmd+Return) while the inline editor is open.
+    @MainActor func testRenameIsUnavailableWhileInlineEditorIsOpen() async throws {
+        let a = try file("a.txt")
+        let model = makeModel(journalURL)
+        model.operation.text = "X"
+        model.add([url(a)]); try await waitForIdle(model)
+        XCTAssertTrue(model.canRename)
+        let coordinator = PreviewTable.Coordinator(model)
+        let table = PreviewTable.makeScroll(coordinator: coordinator).documentView as! PreviewNativeTable
+        PreviewTable.sync(table, coordinator: coordinator, model: model)
+        coordinator.beginEditing(row: 0, in: table)
+        XCTAssertTrue(model.inlineEditing)
+        XCTAssertFalse(model.canRename)
+        model.apply()
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertTrue(exists(a))
+        coordinator.endEditing(commit: false)
+        XCTAssertFalse(model.inlineEditing)
+        XCTAssertTrue(model.canRename)
+        // Clearing the list while the editor is open never leaves Rename waiting.
+        coordinator.beginEditing(row: 0, in: table)
+        model.clear()
+        XCTAssertFalse(model.inlineEditing)
+    }
 }
 #endif
