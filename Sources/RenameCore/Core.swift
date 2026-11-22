@@ -854,6 +854,11 @@ public final class Engine {
         let storage = [journalURL.path, journalURL.path + ".lock", logURL.path].map(storageKey)
         for item in plan {
             let parent = URL(fileURLWithPath: item.entry.path).deletingLastPathComponent()
+            let destination = URL(fileURLWithPath: item.destination).standardizedFileURL
+            guard destination.path == item.destination, destination.deletingLastPathComponent().path == parent.path,
+                  RenameOperation.nameProblem(destination.lastPathComponent, original: item.entry.name) == nil else {
+                throw RenameError("Destination must be a valid name in the same folder: \(item.destination)")
+            }
             if Planner.emptyFile(item.entry.identity),
                try parent.resourceValues(forKeys: [.volumeSupportsExclusiveRenamingKey]).volumeSupportsExclusiveRenaming != true {
                 throw RenameError("\(Planner.emptyFileProblem) \(item.entry.path)")

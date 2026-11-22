@@ -205,6 +205,20 @@ final class EngineReviewFindingTests: ScratchTestCase {
         XCTAssertTrue(saved.steps.contains { $0.batch == stranded && $0.destination == temporary })
         XCTAssertEqual(Set(saved.steps.map(\.batch)).count, Engine.maxBatches + 1)
     }
+    // C5: a caller-built item must stay in its source folder.
+    func testApplyRejectsDestinationOutsideSourceFolder() throws {
+        let a = try file("a.txt"), b = try file("b.txt")
+        let other = root.appendingPathComponent("other")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: false)
+        let e = try engine()
+        for bad in [other.appendingPathComponent("a2.txt").path, root.path + "/other/../other/a2.txt", root.path + "/..", root.path + "/"] {
+            let plan = [PlanItem(entry: try Entry(b), destination: root.appendingPathComponent("bX.txt").path), PlanItem(entry: try Entry(a), destination: bad)]
+            XCTAssertThrowsError(try e.apply(plan), bad)
+            XCTAssertEqual(Set(try names()), ["a.txt", "b.txt", "other", "journal"], bad)
+            XCTAssertEqual(try names(other), [], bad)
+            XCTAssertFalse(e.canUndo, bad)
+        }
+    }
 }
 
 final class EngineProgressHistoryTests: ScratchTestCase {
