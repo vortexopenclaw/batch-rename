@@ -60,11 +60,8 @@ final class PreviewLayoutTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let a = folder.appendingPathComponent("a.txt"), b = folder.appendingPathComponent("b.txt")
         try Data("a".utf8).write(to: a); try Data("b".utf8).write(to: b)
-        let model = Model(journalURL: root.appendingPathComponent("journal/undo.json"))
-        func wait() async throws {
-            for _ in 0..<500 { if !model.busy { return }; try await Task.sleep(nanoseconds: 10_000_000) }
-            XCTFail("Timed out")
-        }
+        let model = makeModel(root.appendingPathComponent("journal/undo.json"))
+        func wait() async throws { try await waitForIdle(model) }
         model.operation.text = "X"; model.add([folder]); try await wait()
         let coordinator = PreviewTable.Coordinator(model)
         let scroll = PreviewTable.makeScroll(coordinator: coordinator)
@@ -102,8 +99,91 @@ final class PreviewLayoutTests: XCTestCase {
         XCTAssertTrue(model.beginInstallation()); model.selection = Set(model.rows.map(\.id)); model.removeSelected()
         XCTAssertEqual(model.rows.count, 2); model.endInstallation()
         model.undo(); try await wait(); XCTAssertEqual(try Data(contentsOf: b), Data("b".utf8))
-        XCTAssertTrue(model.selection.isEmpty)
-        XCTAssertTrue(model.rows.isEmpty)
+        // Undo keeps the list: the renamed row returns to its original name and is pending again.
+        XCTAssertEqual(Set(model.rows.map(\.entry.name)), ["a.txt", "b.txt"])
+        XCTAssertTrue(model.rows.allSatisfy { !$0.done })
+    }
+
+    // Bug 11: cells are reused, and selection-only updates do not reload the table.
+    @MainActor func testCellReuseAndReloadOnlyWhenRowsChange() async throws {
+        let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["BATCH_RENAME_SCRATCH"]!).appendingPathComponent("reload-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let a = root.appendingPathComponent("a.txt"), b = root.appendingPathComponent("b.txt")
+        try Data("a".utf8).write(to: a); try Data("b".utf8).write(to: b)
+        let model = makeModel(root.appendingPathComponent("journal/undo.json"))
+        model.operation.text = "X"; model.add([a, b]); try await waitForIdle(model)
+        let coordinator = PreviewTable.Coordinator(model)
+        let scroll = PreviewTable.makeScroll(coordinator: coordinator)
+        scroll.frame = NSRect(x: 0, y: 0, width: 660, height: 300)
+        let table = scroll.documentView as! PreviewNativeTable
+        PreviewTable.sync(table, coordinator: coordinator, model: model)
+        XCTAssertEqual(table.reloadCount, 1)
+        model.selection = [model.visibleRows[1].id]
+        PreviewTable.sync(table, coordinator: coordinator, model: model)
+        XCTAssertEqual(table.reloadCount, 1, "Selection-only changes must not reload")
+        XCTAssertEqual(table.selectedRowIndexes, IndexSet(integer: 1))
+        model.operation.text = "Y"; try await waitForIdle(model)
+        PreviewTable.sync(table, coordinator: coordinator, model: model)
+        XCTAssertEqual(table.reloadCount, 2)
+        let cell = try XCTUnwrap(coordinator.tableView(table, viewFor: table.tableColumns[1], row: 0) as? FilenameCell)
+        XCTAssertEqual(cell.identifier, FilenameCell.reuseIdentifier)
+        XCTAssertEqual(cell.accessibilityValue() as? String, "aY.txt")
+    }
+
+    // Bug 11: windows are measured once per layout with a bounded number of trial measurements.
+    @MainActor func testWindowMeasuredPerLayoutWithBinarySearch() throws {
+        let cell = FilenameCell(frame: NSRect(x: 0, y: 0, width: 230, height: 25))
+        var op = RenameOperation(); op.text = " tail"
+        let preview = try op.preview(String(repeating: "x", count: 2000) + ".MP4")
+        cell.configure(name: preview.name, ranges: preview.replacements, deletion: false, action: .append)
+        cell.layout()
+        let measured = cell.measurements
+        XCTAssertLessThanOrEqual(cell.lastTrials, 40)
+        XCTAssertTrue(cell.rendered.string.hasSuffix(" tail.MP4"))
+        let image = NSImage(size: cell.bounds.size)
+        image.lockFocus(); for _ in 0..<3 { cell.draw(cell.bounds) }; image.unlockFocus()
+        XCTAssertEqual(cell.measurements, measured, "Drawing must not re-measure")
+        op.action = .prepend
+        let front = try op.preview(String(repeating: "y", count: 2000) + ".MP4")
+        cell.configure(name: front.name, ranges: front.replacements, deletion: false, action: .prepend)
+        cell.layout()
+        XCTAssertTrue(cell.rendered.string.hasPrefix(" tail"))
+        XCTAssertLessThanOrEqual(cell.lastTrials, 40)
+        XCTAssertLessThanOrEqual(cell.rendered.size().width, 222)
+    }
+
+    // Bug 12: accessibility and distinct badges.
+    @MainActor func testCellAccessibilityAndDistinctBadges() {
+        let cell = FilenameCell(frame: NSRect(x: 0, y: 0, width: 230, height: 25))
+        cell.configure(name: "clip.MP4", ranges: [], deletion: false, action: .append, column: "New Name", status: "Already ends with this text", badge: .skipped)
+        XCTAssertTrue(cell.isAccessibilityElement())
+        XCTAssertEqual(cell.accessibilityRole(), .staticText)
+        XCTAssertEqual(cell.accessibilityValue() as? String, "clip.MP4")
+        XCTAssertEqual(cell.accessibilityLabel(), "New Name")
+        XCTAssertEqual(cell.accessibilityHelp(), "Already ends with this text")
+        XCTAssertEqual(cell.toolTip, "clip.MP4\nAlready ends with this text")
+        let skipped = cell.badge.symbol
+        cell.configure(name: "clip.MP4", ranges: [], deletion: false, action: .append, column: "New Name", status: "Name is too long.", badge: .problem)
+        XCTAssertNotEqual(cell.badge.symbol, skipped)
+        XCTAssertEqual(cell.accessibilityHelp(), "Name is too long.")
+        XCTAssertEqual(Set([FilenameCell.Badge.completed, .skipped, .problem, .edited].map(\.symbol)).count, 4)
+        XCTAssertNil(FilenameCell.Badge.none.symbol)
+    }
+
+    // Bug 13: change highlights stay readable on selected rows.
+    @MainActor func testSelectedRowHighlightContrasts() throws {
+        let cell = FilenameCell(frame: NSRect(x: 0, y: 0, width: 230, height: 25))
+        cell.configure(name: "clip, T340.MP4", ranges: [NSRange(location: 4, length: 6)], deletion: false, action: .append)
+        XCTAssertEqual(cell.value.attribute(.backgroundColor, at: 4, effectiveRange: nil) as? NSColor, .systemBlue)
+        cell.backgroundStyle = .emphasized
+        let background = try XCTUnwrap(cell.value.attribute(.backgroundColor, at: 4, effectiveRange: nil) as? NSColor)
+        let foreground = try XCTUnwrap(cell.value.attribute(.foregroundColor, at: 4, effectiveRange: nil) as? NSColor)
+        XCTAssertEqual(background, .white)
+        XCTAssertEqual(foreground, .systemBlue)
+        XCTAssertEqual(cell.value.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor, .alternateSelectedControlTextColor)
+        cell.backgroundStyle = .normal
+        XCTAssertEqual(cell.value.attribute(.backgroundColor, at: 4, effectiveRange: nil) as? NSColor, .systemBlue)
     }
 }
 #endif

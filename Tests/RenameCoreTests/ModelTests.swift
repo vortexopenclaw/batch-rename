@@ -3,30 +3,22 @@ import XCTest
 import Foundation
 
 final class ModelTests: XCTestCase {
-    @MainActor func waitForModel(_ model: Model) async throws {
-        for _ in 0..<500 {
-            if !model.busy { return }
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
-        XCTFail("Model did not finish")
-    }
-
     @MainActor func testRemovedExplicitRootDoesNotBlockFreshDrops() async throws {
         let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"]!).appendingPathComponent("removed-root-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let a = root.appendingPathComponent("a.txt"), b = root.appendingPathComponent("b.txt")
         try Data("a".utf8).write(to: a); try Data("b".utf8).write(to: b)
-        let model = Model(journalURL: root.appendingPathComponent("journal/undo.json"))
-        model.operation.text = "X"; model.add([a]); try await waitForModel(model)
+        let model = makeModel(root.appendingPathComponent("journal/undo.json"))
+        model.operation.text = "X"; model.add([a]); try await waitForIdle(model)
         let alias = root.appendingPathComponent("A.txt")
         if FileManager.default.fileExists(atPath: alias.path) {
-            model.add([alias]); try await waitForModel(model)
+            model.add([alias]); try await waitForIdle(model)
             XCTAssertEqual(model.rows.count, 1)
         }
         model.selection = Set(model.rows.map(\.id)); model.removeSelected()
         try FileManager.default.removeItem(at: a)
-        model.add([b]); try await waitForModel(model)
+        model.add([b]); try await waitForIdle(model)
         XCTAssertEqual(model.rows.map { $0.entry.path }, [b.path])
         XCTAssertEqual(model.pendingCount, 1)
         XCTAssertEqual(model.operation.text, "X")
@@ -41,14 +33,14 @@ final class ModelTests: XCTestCase {
         try Data("child".utf8).write(to: parent.appendingPathComponent("child.txt"))
         let b = root.appendingPathComponent("fresh.txt")
         try Data("fresh".utf8).write(to: b)
-        let model = Model(journalURL: root.appendingPathComponent("journal/undo.json"))
-        model.folders = true; try await waitForModel(model)
-        model.operation.text = "X"; model.add([parent]); try await waitForModel(model)
-        model.apply(); try await waitForModel(model)
+        let model = makeModel(root.appendingPathComponent("journal/undo.json"))
+        model.folders = true; try await waitForIdle(model)
+        model.operation.text = "X"; model.add([parent]); try await waitForIdle(model)
+        model.apply(); try await waitForIdle(model)
         let renamed = root.appendingPathComponent("parentX/childX.txt")
         let handle = try FileHandle(forWritingTo: renamed)
         try handle.write(contentsOf: Data("modified child".utf8)); try handle.close()
-        model.undo(); model.add([b]); try await waitForModel(model)
+        model.undo(); model.add([b]); try await waitForIdle(model)
         XCTAssertTrue(FileManager.default.fileExists(atPath: parent.appendingPathComponent("childX.txt").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("parentX").path))
         XCTAssertTrue(model.rows.contains { $0.entry.path == b.path })
@@ -63,11 +55,11 @@ final class ModelTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let b = root.appendingPathComponent("b.txt")
         try Data("b".utf8).write(to: b)
-        let model = Model(journalURL: root.appendingPathComponent("journal/undo.json"))
-        model.add([root.appendingPathComponent("missing.txt")]); try await waitForModel(model)
+        let model = makeModel(root.appendingPathComponent("journal/undo.json"))
+        model.add([root.appendingPathComponent("missing.txt")]); try await waitForIdle(model)
         XCTAssertTrue(model.rows.isEmpty)
         // Clear List must remain available even when a failed scan produced no rows.
-        model.clear(); model.add([b]); try await waitForModel(model)
+        model.clear(); model.add([b]); try await waitForIdle(model)
         XCTAssertEqual(model.rows.map { $0.entry.path }, [b.path])
     }
 
@@ -77,14 +69,8 @@ final class ModelTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let file = root.appendingPathComponent("clip.txt")
         try Data("fixture".utf8).write(to: file)
-        let model = Model(journalURL: root.appendingPathComponent("journal/undo.json"))
-        func wait() async throws {
-            for _ in 0..<500 {
-                if !model.busy { return }
-                try await Task.sleep(nanoseconds: 10_000_000)
-            }
-            XCTFail("Model did not finish")
-        }
+        let model = makeModel(root.appendingPathComponent("journal/undo.json"))
+        func wait() async throws { try await waitForIdle(model) }
         model.operation.action = .replace; model.operation.search = "clip"; model.operation.text = "CLIP"
         model.add([file]); try await wait()
         XCTAssertTrue(model.beginInstallation())
@@ -112,17 +98,14 @@ final class ModelTests: XCTestCase {
             try Data("fixture".utf8).write(to: url)
             return url
         }
-        let model = Model(journalURL: root.appendingPathComponent("journal/undo.json"))
+        let model = makeModel(root.appendingPathComponent("journal/undo.json"))
         model.operation.text = " edited"
         model.add(Array(urls.prefix(200)))
         XCTAssertTrue(model.busy)
         // No actor yield: both subsequent batches arrive while the first scan is busy.
         model.add(Array(urls[200..<400]))
         model.add(Array(urls[400...]) + [urls[0]])
-        for _ in 0..<1000 {
-            if !model.busy { break }
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
+        try await waitForIdle(model)
         XCTAssertFalse(model.busy)
         XCTAssertEqual(Set(model.rows.map { $0.entry.path }), Set(urls.map(\.path)))
         XCTAssertEqual(model.pendingCount, 500)
@@ -137,14 +120,8 @@ final class ModelTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let a = root.appendingPathComponent("a.txt"), b = root.appendingPathComponent("b.txt"), c = root.appendingPathComponent("c.txt")
         for url in [a, b, c] { try Data("fixture".utf8).write(to: url) }
-        let model = Model(journalURL: root.appendingPathComponent("journal/undo.json"))
-        func wait() async throws {
-            for _ in 0..<500 {
-                if !model.busy { return }
-                try await Task.sleep(nanoseconds: 10_000_000)
-            }
-            XCTFail("Model did not finish")
-        }
+        let model = makeModel(root.appendingPathComponent("journal/undo.json"))
+        func wait() async throws { try await waitForIdle(model) }
         model.operation.text = "X"
         model.add([a]); try await wait()
         model.apply(); XCTAssertTrue(model.busy); model.add([b]); try await wait()
@@ -152,7 +129,8 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(model.pendingCount, 1)
         XCTAssertTrue(FileManager.default.fileExists(atPath: b.path))
         model.undo(); XCTAssertTrue(model.busy); model.add([c]); try await wait()
-        XCTAssertEqual(model.rows.map { $0.entry.path }, [c.path])
+        // Undo keeps unrelated rows and the drop queued during undo.
+        XCTAssertEqual(Set(model.rows.map { $0.entry.path }), [a.path, b.path, c.path])
         XCTAssertTrue(FileManager.default.fileExists(atPath: a.path))
         XCTAssertEqual(model.operation.text, "X")
     }
@@ -198,14 +176,8 @@ final class ModelTests: XCTestCase {
         try Data("external".utf8).write(to: original)
         try FileManager.default.moveItem(at: original, to: external)
         try Data("fresh".utf8).write(to: fresh)
-        var model: Model? = Model(journalURL: root.appendingPathComponent("journal/undo.json"))
-        func wait() async throws {
-            for _ in 0..<500 {
-                if model?.busy == false { return }
-                try await Task.sleep(nanoseconds: 10_000_000)
-            }
-            XCTFail("Model did not finish")
-        }
+        var model: Model? = makeModel(root.appendingPathComponent("journal/undo.json"))
+        func wait() async throws { try await waitForIdle(model) }
         model!.operation.text = ", T340"
         model!.add([external]); try await wait()
         XCTAssertEqual(model!.pendingCount, 0)
@@ -223,7 +195,7 @@ final class ModelTests: XCTestCase {
         model!.add([external]); try await wait()
         XCTAssertTrue(model!.rows[0].preview!.skipped)
         model = nil
-        model = Model(journalURL: root.appendingPathComponent("journal/undo.json"))
+        model = makeModel(root.appendingPathComponent("journal/undo.json"))
         model!.operation.text = ", T340"; model!.add([external]); try await wait()
         XCTAssertEqual(model!.pendingCount, 0); XCTAssertTrue(model!.rows[0].preview!.skipped)
         model!.operation.text = ""
@@ -238,14 +210,8 @@ final class ModelTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let a = root.appendingPathComponent("a.txt"), b = root.appendingPathComponent("b.txt")
         try Data("a".utf8).write(to: a); try Data("b".utf8).write(to: b)
-        let model = Model(journalURL: root.appendingPathComponent("journal/undo.json"))
-        func wait() async throws {
-            for _ in 0..<500 {
-                if !model.busy { return }
-                try await Task.sleep(nanoseconds: 10_000_000)
-            }
-            XCTFail("Model did not finish")
-        }
+        let model = makeModel(root.appendingPathComponent("journal/undo.json"))
+        func wait() async throws { try await waitForIdle(model) }
         model.operation.text = " edited"
         model.add([a]); try await wait()
         XCTAssertEqual(model.pendingCount, 1)
@@ -272,14 +238,8 @@ final class ModelTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         try Data("fixture".utf8).write(to: parent.appendingPathComponent("a.txt"))
         let journal = root.appendingPathComponent("journal/undo.json")
-        var model: Model? = Model(journalURL: journal)
-        func wait() async throws {
-            for _ in 0..<500 {
-                if model?.busy == false { return }
-                try await Task.sleep(nanoseconds: 10_000_000)
-            }
-            XCTFail("Model did not finish")
-        }
+        var model: Model? = makeModel(journal)
+        func wait() async throws { try await waitForIdle(model) }
         model!.operation.text = "X"; model!.add([parent]); try await wait()
         model!.apply(); try await wait()
         model!.clear()
@@ -292,7 +252,7 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(model!.pendingCount, 0)
         XCTAssertTrue(model!.rows.contains { $0.entry.name == "aX.txt" && $0.done })
         model = nil
-        model = Model(journalURL: journal)
+        model = makeModel(journal)
         model!.operation.text = "Y"
         model!.add([root.appendingPathComponent("parentY")]); try await wait()
         XCTAssertEqual(model!.pendingCount, 0)
@@ -311,14 +271,8 @@ final class ModelTests: XCTestCase {
         let a = root.appendingPathComponent("a.txt"), renamed = root.appendingPathComponent("aX.txt")
         let journal = root.appendingPathComponent("journal/undo.json")
         try Data("a".utf8).write(to: a)
-        var model: Model? = Model(journalURL: journal)
-        func wait() async throws {
-            for _ in 0..<500 {
-                if !model!.busy { return }
-                try await Task.sleep(nanoseconds: 10_000_000)
-            }
-            XCTFail("Model did not finish")
-        }
+        var model: Model? = makeModel(journal)
+        func wait() async throws { try await waitForIdle(model) }
         model!.operation.text = "X"; model!.add([a]); try await wait()
         model!.apply(); try await wait()
         // In-place edit preserves the directory entry, unlike atomic replacement.
@@ -330,7 +284,7 @@ final class ModelTests: XCTestCase {
         model!.clear(); model!.add([renamed]); try await wait()
         XCTAssertEqual(model!.pendingCount, 0); XCTAssertTrue(model!.rows[0].done)
         model = nil
-        model = Model(journalURL: journal)
+        model = makeModel(journal)
         model!.operation.text = "Y"; model!.add([renamed]); try await wait()
         XCTAssertEqual(model!.pendingCount, 0); XCTAssertTrue(model!.rows[0].done)
         model!.apply(); try await wait()
@@ -348,12 +302,9 @@ final class ModelTests: XCTestCase {
         try Data("invalid journal".utf8).write(to: journal)
         let file = root.appendingPathComponent("a.txt")
         try Data("fixture".utf8).write(to: file)
-        let model = Model(journalURL: journal)
+        let model = makeModel(journal)
         model.operation.text = "X"; model.add([file])
-        for _ in 0..<500 {
-            if !model.busy { break }
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
+        try await waitForIdle(model)
         XCTAssertFalse(model.busy)
         XCTAssertEqual(model.pendingCount, 0)
         XCTAssertTrue(model.message.contains("Rename unavailable"))
