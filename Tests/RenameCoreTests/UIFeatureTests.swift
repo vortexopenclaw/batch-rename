@@ -303,6 +303,37 @@ final class UIFeatureTests: ScratchTestCase {
         XCTAssertEqual(CompanionEdit.propagate(automatic: "abcF, T.MP4", edited: "abcF go, T.MP4", companion: "abcRR, T.MP4"), nil)
     }
 
+    @MainActor func testCompanionEditsFollowToggleAndSourceChanges() async throws {
+        let front = try file("2026_1024_222430_004409F.MP4")
+        try file("2026_1024_222430_004409R.MP4")
+        let model = makeModel(journalURL)
+        model.operation.text = ", T340"
+        model.folders = false
+        model.add([url((front as NSString).deletingLastPathComponent)]); try await waitForIdle(model)
+        XCTAssertEqual(model.rows.count, 2)
+        let id = model.rows.first { $0.original.hasSuffix("F.MP4") }!.id
+        let rear = { model.rows.first { $0.original.hasSuffix("R.MP4") }!.proposed }
+        // Companion files off: an edit stays on its own row.
+        XCTAssertFalse(model.companions)
+        model.setOverride(id, to: "2026_1024_222430_004409F night, T340.MP4"); try await waitForIdle(model)
+        XCTAssertEqual(rear(), "2026_1024_222430_004409R, T340.MP4")
+        // Turning companion files on makes the rear clip follow the front edit.
+        model.companions = true; try await waitForIdle(model)
+        XCTAssertEqual(rear(), "2026_1024_222430_004409R night, T340.MP4")
+        // Changing the front edit carries over; reverting it reverts the rear clip too.
+        model.setOverride(id, to: "2026_1024_222430_004409F rain, T340.MP4"); try await waitForIdle(model)
+        XCTAssertEqual(rear(), "2026_1024_222430_004409R rain, T340.MP4")
+        model.useAutomaticName([id]); try await waitForIdle(model)
+        XCTAssertEqual(rear(), "2026_1024_222430_004409R, T340.MP4")
+        // Setting a following companion back to automatic detaches it from later edits.
+        model.setOverride(id, to: "2026_1024_222430_004409F snow, T340.MP4"); try await waitForIdle(model)
+        let rearID = model.rows.first { $0.original.hasSuffix("R.MP4") }!.id
+        model.useAutomaticName([rearID]); try await waitForIdle(model)
+        XCTAssertEqual(rear(), "2026_1024_222430_004409R, T340.MP4")
+        model.setOverride(id, to: "2026_1024_222430_004409F hail, T340.MP4"); try await waitForIdle(model)
+        XCTAssertEqual(rear(), "2026_1024_222430_004409R, T340.MP4")
+    }
+
     // MARK: Feature 6: tokens
 
     @MainActor func testSequenceFollowsDisplayedPendingOrderAndStartAt() async throws {

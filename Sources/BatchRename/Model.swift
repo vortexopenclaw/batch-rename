@@ -56,7 +56,7 @@ struct Row: Identifiable {
     /// Filesystem problem from the planner, valid while `proposed == problemName`.
     var problem: String?
     var problemName: String?
-    /// The new name was typed by hand (or propagated from a companion edit).
+    /// The new name was typed by hand, or follows a companion edit.
     var manual = false
     var preview: NamePreview?
     var issue: String? { error ?? problem }
@@ -81,9 +81,13 @@ struct Row: Identifiable {
     private(set) var rowsVersion = 0
     @Published var selection = Set<UUID>()
     @Published private(set) var disabledTypes = Set<String>()
-    /// Manual names keyed by directory entry (path plus identity).
+    /// Hand-typed names keyed by directory entry (path plus identity).
     @Published private(set) var overrides: [String: String] = [:]
-    private var propagated = Set<String>()
+    /// Order of hand edits; a companion group's other rows follow its newest edit.
+    private var editOrder: [String: Int] = [:]
+    private var editCounter = 0
+    /// Companion rows the user set back to automatic, so they stop following the group's edit.
+    private var keepAutomatic = Set<String>()
     private var excluded = Set<String>()
 
     // MARK: Settings
@@ -245,7 +249,7 @@ struct Row: Identifiable {
     func clear() {
         guard state == .idle else { return }
         rows = []; selection = []; excluded = []; inventory.roots = []
-        overrides = [:]; propagated = []; disabledTypes = []; scanIssues = []; scanNotes = []
+        overrides = [:]; editOrder = [:]; keepAutomatic = []; disabledTypes = []; scanIssues = []; scanNotes = []
         plan = []; proposalCount = 0
         generation += 1; validatedGeneration = generation
         notes = []; outcome = ModelText.clearedList
@@ -292,39 +296,54 @@ struct Row: Identifiable {
 
     private func key(_ e: Entry) -> String { "\(e.path)|\(e.identity.device)|\(e.identity.inode)|\(e.identity.birth)|\(e.identity.nanos)" }
     /// Sets a hand-typed new name. Empty or automatic names revert to automatic.
-    /// Companions without their own edit receive the same change.
+    /// With companion files on, the group's other rows follow the newest edit. Their
+    /// names are derived during preview, so later changes or reverts carry over.
     func setOverride(_ id: UUID, to name: String) {
         guard state == .idle, let row = rows.first(where: { $0.id == id }), !row.done else { return }
         let k = key(row.entry)
         resetNotes()
-        propagated.remove(k)
-        var updated = overrides
         if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.utf8.elementsEqual(row.automatic.utf8) {
-            updated[k] = nil
+            if overrides[k] != nil { overrides[k] = nil; editOrder[k] = nil } else { keepAutomatic.insert(k) }
         } else {
-            updated[k] = name
-            let group = Self.group(of: row.entry)
-            var applied = 0
-            for other in visibleRows where other.id != id && !other.done && !other.entry.identity.folder && Self.group(of: other.entry) == group {
-                let ok = key(other.entry)
-                if updated[ok] != nil && !propagated.contains(ok) { continue }
-                guard let derived = CompanionEdit.propagate(automatic: row.automatic, edited: name, companion: other.automatic) else { continue }
-                updated[ok] = derived
-                propagated.insert(ok)
-                applied += 1
-            }
+            editCounter += 1
+            overrides[k] = name; editOrder[k] = editCounter; keepAutomatic.remove(k)
+            let applied = companionNames(rows, eligible: Set(visibleRows.map(\.id))).values.filter { $0.source == k }.count
             if applied > 0 { notes = [ModelText.companions(applied)] }
         }
-        overrides = updated
         preview()
         if !notes.isEmpty { message = notes.joined(separator: " ") }
     }
     func useAutomaticName(_ ids: Set<UUID>) {
         guard state == .idle else { return }
-        let keys = rows.filter { ids.contains($0.id) }.map { key($0.entry) }
-        guard keys.contains(where: { overrides[$0] != nil }) else { return }
-        for k in keys { overrides[k] = nil; propagated.remove(k) }
+        var changed = false
+        for row in rows where ids.contains(row.id) && row.manual {
+            let k = key(row.entry)
+            if overrides[k] != nil { overrides[k] = nil; editOrder[k] = nil } else { keepAutomatic.insert(k) }
+            changed = true
+        }
+        guard changed else { return }
         resetNotes(); preview()
+    }
+    /// Names companions derive from the newest hand edit in their group. Rows with their
+    /// own edit, rows set back to automatic, folders, and mismatched names are left alone.
+    private func companionNames(_ rows: [Row], eligible: Set<UUID>) -> [String: (name: String, source: String)] {
+        guard companions else { return [:] }
+        var sources: [String: (order: Int, key: String, automatic: String, name: String)] = [:]
+        for row in rows where eligible.contains(row.id) && !row.done && !row.entry.identity.folder {
+            let k = key(row.entry)
+            guard let name = overrides[k], let order = editOrder[k] else { continue }
+            let group = Self.group(of: row.entry)
+            if (sources[group]?.order ?? Int.min) < order { sources[group] = (order, k, row.automatic, name) }
+        }
+        guard !sources.isEmpty else { return [:] }
+        var result: [String: (name: String, source: String)] = [:]
+        for row in rows where eligible.contains(row.id) && !row.done && !row.entry.identity.folder {
+            let k = key(row.entry)
+            guard overrides[k] == nil, !keepAutomatic.contains(k), let source = sources[Self.group(of: row.entry)], source.key != k,
+                  let name = CompanionEdit.propagate(automatic: source.automatic, edited: source.name, companion: row.automatic) else { continue }
+            result[k] = (name, source.key)
+        }
+        return result
     }
 
     // MARK: Recent text and presets
@@ -441,15 +460,19 @@ struct Row: Identifiable {
         }
         let visible = Set(visibleRows.map(\.id))
         var updated = rows, proposals: [Proposal] = [], index = 0
+        var automatics: [Int: NamePreview] = [:]
         for i in updated.indices where !updated[i].done && visible.contains(updated[i].id) {
             index += 1
             let entry = updated[i].entry
             let context = TokenContext(index: index, modified: entry.modified)
-            var automatic: NamePreview?
-            do { automatic = try operation.preview(updated[i].original, folder: entry.identity.folder, context: context); updated[i].error = nil }
+            do { automatics[i] = try operation.preview(updated[i].original, folder: entry.identity.folder, context: context); updated[i].error = nil }
             catch { updated[i].error = error.localizedDescription }
-            updated[i].automatic = automatic?.name ?? updated[i].original
-            if let name = overrides[key(entry)] {
+            updated[i].automatic = automatics[i]?.name ?? updated[i].original
+        }
+        let derived = companionNames(updated, eligible: visible)
+        for i in updated.indices where !updated[i].done && visible.contains(updated[i].id) {
+            let k = key(updated[i].entry), automatic = automatics[i]
+            if let name = overrides[k] ?? derived[k]?.name {
                 updated[i].manual = true; updated[i].error = nil
                 updated[i].proposed = name
                 updated[i].preview = Self.editedPreview(original: updated[i].original, edited: name, base: automatic)
@@ -459,7 +482,7 @@ struct Row: Identifiable {
                 updated[i].preview = automatic
             }
             if updated[i].problemName != updated[i].proposed { updated[i].problem = nil; updated[i].problemName = nil }
-            if updated[i].error == nil && updated[i].changes { proposals.append(Proposal(entry: entry, name: updated[i].proposed)) }
+            if updated[i].error == nil && updated[i].changes { proposals.append(Proposal(entry: updated[i].entry, name: updated[i].proposed)) }
         }
         rows = updated
         plan = []
@@ -569,7 +592,7 @@ struct Row: Identifiable {
             updated[i].problem = nil; updated[i].problemName = nil
         }
         rows = updated
-        for k in oldKeys { overrides[k] = nil; propagated.remove(k) }
+        for k in oldKeys { overrides[k] = nil; editOrder[k] = nil; keepAutomatic.remove(k) }
         refreshFrozen()
         state = .idle
         refreshHistory()
