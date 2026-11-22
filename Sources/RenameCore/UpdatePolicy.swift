@@ -23,11 +23,17 @@ public struct UpdateTrust {
     public init(publicKey: Data, downloadURL: URL) { self.publicKey = publicKey; self.downloadURL = downloadURL }
 }
 public enum UpdatePolicy {
+    /// Exactly three ASCII decimal components without leading zeros (`0` itself is allowed).
     public static func version(_ text: String) -> [Int]? {
         let parts = text.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 3, parts.allSatisfy({ !$0.isEmpty && $0.utf8.allSatisfy { $0 >= 48 && $0 <= 57 } }) else { return nil }
+        guard parts.count == 3, parts.allSatisfy({ !$0.isEmpty && $0.utf8.allSatisfy { $0 >= 48 && $0 <= 57 } && ($0 == "0" || !$0.hasPrefix("0")) }) else { return nil }
         let numbers = parts.compactMap { Int($0) }
         return numbers.count == 3 ? numbers : nil
+    }
+    /// Parsed equality: invalid versions are never equal, even when byte-identical.
+    public static func sameVersion(_ a: String?, _ b: String?) -> Bool {
+        guard let a, let b, let left = version(a), let right = version(b) else { return false }
+        return left == right
     }
     public static func validate(_ manifest: UpdateManifest, trust: UpdateTrust?, currentVersion: String, osVersion: String, allowCurrent: Bool = false) throws {
         guard let trust else { throw RenameError("Updates are not configured.") }

@@ -40,7 +40,7 @@ private struct InstallPlan: Codable {
                 let os = ProcessInfo.processInfo.operatingSystemVersion
                 try UpdatePolicy.validate(manifest, trust: config.trust, currentVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "", osVersion: "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)", allowCurrent: true)
                 try await waitForIdle()
-                if manifest.version == Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
+                if UpdatePolicy.sameVersion(manifest.version, Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) {
                     guard !automatic else { return }
                     let alert = NSAlert(); alert.messageText = "Batch Rename is up to date"; alert.runModal(); return
                 }
@@ -257,7 +257,7 @@ private struct InstallPlan: Codable {
         guard args.count == 4, args[1] == "--update-health", AppDelegate.model?.startupHealthy == true else { return }
         do {
             let plan = try JSONDecoder().decode(InstallPlan.self, from: Data(contentsOf: URL(fileURLWithPath: args[2])))
-            guard plan.original == Bundle.main.bundleURL, plan.token == args[3], plan.manifest.version == Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+            guard plan.original == Bundle.main.bundleURL, plan.token == args[3], UpdatePolicy.sameVersion(plan.manifest.version, Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String),
                   plan.transaction.deletingLastPathComponent() == plan.original.deletingLastPathComponent() else { return }
             try UpdateInstaller.physical(plan.transaction)
             try UpdateInstaller.validateBundle(plan.original, manifest: plan.manifest)

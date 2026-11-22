@@ -99,7 +99,7 @@ public enum UpdateInstaller {
         let info = app.appendingPathComponent("Contents/Info.plist")
         guard let dict = try PropertyListSerialization.propertyList(from: Data(contentsOf: info), format: nil) as? [String: Any],
               dict["CFBundleIdentifier"] as? String == manifest.bundleIdentifier,
-              dict["CFBundleShortVersionString"] as? String == manifest.version,
+              UpdatePolicy.sameVersion(dict["CFBundleShortVersionString"] as? String, manifest.version),
               dict["CFBundleVersion"] as? String == manifest.build,
               dict["CFBundleExecutable"] as? String == "BatchRename" else { throw RenameError("Update bundle identity mismatch") }
         guard let minimum = minimumMacOS(dict["LSMinimumSystemVersion"]),
