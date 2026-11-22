@@ -1,4 +1,6 @@
-# Bug-fix verification
+# Bug-fix verification record: 0.1.3
+
+> Historical record of the 0.1.3 (build 4) verification pass, kept as it was observed. It is not maintained. Commands and counts below reflect that release, including the since-removed legacy R2 Worker and publisher. For current behavior see [UPDATES.md](UPDATES.md); for the release procedure see [HOSTING.md](HOSTING.md).
 
 This local, unreleased pass repairs the initial advisory-review finding and additional defects confirmed by isolated headless reproductions. The pre-existing removal of a UI explanatory label is preserved.
 
