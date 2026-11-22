@@ -52,24 +52,26 @@ private struct InstallPlan: Codable {
                 guard alert.runModal() == .alertFirstButtonReturn else { return }
                 guard let model = AppDelegate.model, model.beginInstallation() else { throw RenameError("Wait for the current file operation to finish, then check again.") }
                 installationModel = model
-                let data = try await fetcher.fetch(manifest.downloadURL, limit: 256 * 1024 * 1024)
-                try UpdatePolicy.validateArchive(data, manifest: manifest)
-                guard AppDelegate.model?.busy != true else { throw RenameError("Wait for the current file operation to finish, then check again.") }
+                // Location is checked before downloading; the archive streams to disk while hashing.
                 let original = Bundle.main.bundleURL
-                try UpdateInstaller.physical(original)
-                guard original.pathExtension == "app", !original.path.contains("/AppTranslocation/") else { throw RenameError("Move the app to a writable installation folder before updating.") }
-                let transaction = original.deletingLastPathComponent().appendingPathComponent(".batch-rename-update-" + UUID().uuidString)
-                try FileManager.default.createDirectory(at: transaction, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-                try data.write(to: transaction.appendingPathComponent("release.zip"), options: .withoutOverwriting)
-                try UpdateArchive.extract(data, to: transaction.appendingPathComponent("stage"))
-                try UpdateInstaller.validateBundle(transaction.appendingPathComponent("stage/Batch Rename.app"), manifest: manifest)
-                guard let parentLaunch = NSRunningApplication.current.launchDate else { throw RenameError("Cannot establish parent identity; original retained.") }
-                try Self.requireOnlyInstance(original, allowed: [getpid()])
-                let plan = InstallPlan(original: original, transaction: transaction, manifest: manifest, parent: getpid(), token: UUID().uuidString, parentLaunch: parentLaunch)
-                let planURL = transaction.appendingPathComponent("plan.json")
-                try JSONEncoder().encode(plan).write(to: planURL, options: .withoutOverwriting)
-                let process = Process(); process.executableURL = Bundle.main.executableURL; process.arguments = ["--update-install", planURL.path]
-                try process.run()
+                let transaction = try await UpdateTransactions.prepare(original: original, manifest: manifest) {
+                    try await fetcher.download(manifest.downloadURL, to: $0, limit: 256 * 1024 * 1024)
+                }
+                let process = Process()
+                do {
+                    guard AppDelegate.model?.busy != true else { throw RenameError("Wait for the current file operation to finish, then check again.") }
+                    guard let parentLaunch = NSRunningApplication.current.launchDate else { throw RenameError("Cannot establish parent identity; original retained.") }
+                    try Self.requireOnlyInstance(original, allowed: [getpid()])
+                    let plan = InstallPlan(original: original, transaction: transaction, manifest: manifest, parent: getpid(), token: UUID().uuidString, parentLaunch: parentLaunch)
+                    let planURL = transaction.appendingPathComponent("plan.json")
+                    try JSONEncoder().encode(plan).write(to: planURL, options: .withoutOverwriting)
+                    process.executableURL = Bundle.main.executableURL; process.arguments = ["--update-install", planURL.path]
+                    try process.run()
+                } catch {
+                    // No helper owns the transaction yet, so nothing in it is needed for recovery.
+                    UpdateTransactions.discard(transaction)
+                    throw error
+                }
                 for _ in 0..<100 {
                     if FileManager.default.fileExists(atPath: transaction.appendingPathComponent("ready").path) { break }
                     guard process.isRunning else { throw RenameError("Update helper could not validate this app. Original retained.") }
@@ -167,10 +169,12 @@ private struct InstallPlan: Codable {
         let config = try UpdateConfiguration.load()
         let os = ProcessInfo.processInfo.operatingSystemVersion
         try UpdatePolicy.validate(plan.manifest, trust: config.trust, currentVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "", osVersion: "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)", highestSequence: UpdateSequenceStore().highest)
-        try UpdatePolicy.validateArchive(Data(contentsOf: plan.transaction.appendingPathComponent("release.zip")), manifest: plan.manifest)
+        // One mapped read: the archive is hashed and extracted from the same bytes.
+        let archive = try Data(contentsOf: plan.transaction.appendingPathComponent("release.zip"), options: .alwaysMapped)
+        try UpdatePolicy.validateArchive(archive, manifest: plan.manifest)
         // Re-extract authenticated bytes in the helper, never trust an earlier staged directory.
         let stage = plan.transaction.appendingPathComponent("install")
-        try UpdateArchive.extract(Data(contentsOf: plan.transaction.appendingPathComponent("release.zip")), to: stage)
+        try UpdateArchive.extract(archive, to: stage)
         let app = stage.appendingPathComponent("Batch Rename.app")
         try UpdateInstaller.validateBundle(app, manifest: plan.manifest)
         try Data(plan.token.utf8).write(to: plan.transaction.appendingPathComponent("ready"), options: .withoutOverwriting)

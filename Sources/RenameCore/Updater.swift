@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 
 public struct UpdateConfiguration: Codable {
     public let manifestURL: URL
@@ -29,19 +30,93 @@ public final class UpdateFetcher: NSObject, URLSessionTaskDelegate, @unchecked S
         return "BatchRename/\(version) (\(build)) CFNetwork/Darwin"
     }
     public func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
-    public func fetch(_ url: URL, limit: Int, configuration: URLSessionConfiguration = .ephemeral) async throws -> Data {
+    func open(_ url: URL, limit: Int, configuration: URLSessionConfiguration) async throws -> (URLSession.AsyncBytes, URLSession) {
         guard url.scheme == "https" else { throw RenameError("HTTPS is required") }
         configuration.timeoutIntervalForRequest = 30; configuration.timeoutIntervalForResource = 180
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
         var request = URLRequest(url: url)
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("application/json, application/zip, application/octet-stream", forHTTPHeaderField: "Accept")
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200, response.expectedContentLength <= limit else { throw RenameError("Update download rejected") }
+        do {
+            let (bytes, response) = try await session.bytes(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200, response.expectedContentLength <= limit else { throw RenameError("Update download rejected") }
+            return (bytes, session)
+        } catch { session.invalidateAndCancel(); throw error }
+    }
+    public func fetch(_ url: URL, limit: Int, configuration: URLSessionConfiguration = .ephemeral) async throws -> Data {
+        let (bytes, session) = try await open(url, limit: limit, configuration: configuration)
+        defer { session.invalidateAndCancel() }
         var data = Data()
         for try await byte in bytes { guard data.count < limit else { throw RenameError("Update exceeds size limit") }; data.append(byte) }
         return data
+    }
+}
+
+extension UpdateFetcher {
+    /// Streams to a new owner-only file while hashing, so memory stays bounded by one chunk.
+    /// Returns the lowercase hex SHA-256. Refuses existing paths and links; removes partial output on failure.
+    public func download(_ url: URL, to file: URL, limit: Int, configuration: URLSessionConfiguration = .ephemeral) async throws -> String {
+        let descriptor = Darwin.open(file.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw RenameError("Cannot create update download file: \(errno)") }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        do {
+            let (bytes, session) = try await open(url, limit: limit, configuration: configuration)
+            defer { session.invalidateAndCancel() }
+            var hasher = SHA256(), buffer = Data(), total = 0
+            let chunk = 64 * 1024
+            buffer.reserveCapacity(chunk)
+            func flush() throws { hasher.update(data: buffer); try handle.write(contentsOf: buffer); buffer.removeAll(keepingCapacity: true) }
+            for try await byte in bytes {
+                total += 1
+                guard total <= limit else { throw RenameError("Update exceeds size limit") }
+                buffer.append(byte)
+                if buffer.count == chunk { try flush() }
+            }
+            try flush()
+            try handle.close()
+            return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        } catch {
+            try? handle.close()
+            unlink(file.path)
+            throw error
+        }
+    }
+}
+
+/// Hidden `.batch-rename-update-UUID` directories beside the app.
+public enum UpdateTransactions {
+    public static let prefix = ".batch-rename-update-"
+    /// Refuses translocated, linked, or unwritable installations before anything is downloaded.
+    public static func checkInstallLocation(_ original: URL) throws {
+        try UpdateInstaller.physical(original)
+        let parent = original.deletingLastPathComponent()
+        guard original.pathExtension == "app", !original.path.contains("/AppTranslocation/"),
+              access(parent.path, W_OK) == 0, access(original.path, W_OK) == 0 else { throw RenameError("Move the app to a writable installation folder before updating.") }
+    }
+    /// Creates a private transaction holding only the authenticated `release.zip`.
+    /// The parent validates a scratch extraction and deletes it; the helper extracts again.
+    /// Any failure removes the whole transaction, since no helper can be using it yet.
+    public static func prepare(original: URL, manifest: UpdateManifest, download: (URL) async throws -> String) async throws -> URL {
+        try checkInstallLocation(original)
+        let transaction = original.deletingLastPathComponent().appendingPathComponent(prefix + UUID().uuidString)
+        try FileManager.default.createDirectory(at: transaction, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        do {
+            let archive = transaction.appendingPathComponent("release.zip")
+            guard try await download(archive) == manifest.sha256 else { throw RenameError("Update checksum mismatch.") }
+            let stage = transaction.appendingPathComponent("stage")
+            try UpdateArchive.extract(Data(contentsOf: archive, options: .alwaysMapped), to: stage)
+            try UpdateInstaller.validateBundle(stage.appendingPathComponent("Batch Rename.app"), manifest: manifest)
+            try FileManager.default.removeItem(at: stage)
+            return transaction
+        } catch {
+            discard(transaction)
+            throw error
+        }
+    }
+    /// Removes a transaction that no helper has been given.
+    public static func discard(_ transaction: URL) {
+        guard transaction.lastPathComponent.hasPrefix(prefix), (try? UpdateInstaller.physical(transaction)) != nil else { return }
+        try? FileManager.default.removeItem(at: transaction)
     }
 }
 
