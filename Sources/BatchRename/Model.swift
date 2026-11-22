@@ -113,10 +113,14 @@ struct Row: Identifiable {
     // MARK: Operation state
 
     @Published private(set) var state: OperationState = .idle
+    /// The table's inline New Name editor is open; Rename waits until it closes.
+    @Published var inlineEditing = false
     /// A file operation (scan, rename, or undo) is running. Installation is separate.
     var busy: Bool { state == .scanning || state == .applying || state == .undoing }
     var installing: Bool { state == .installing }
     var controlsLocked: Bool { state != .idle }
+    /// Hand edits are accepted while idle or scanning; preview waits for the scan.
+    var namesEditable: Bool { state == .idle || state == .scanning }
     var canCancel: Bool { state == .applying }
     @Published var message = ModelText.dropToBegin
     /// Paths and errors behind the last scan's summary, for the message tooltip.
@@ -127,6 +131,8 @@ struct Row: Identifiable {
     private var outcome: String?
     /// Short notes (drops, companion edits) shown before the ready summary.
     private var notes: [String] = []
+    /// Notes from drops during a rename or undo, shown after its outcome.
+    private var queuedNotes: [String] = []
     /// Summary of the last scan's skipped items, replaced by every scan.
     private var scanNotes: [String] = []
 
@@ -139,7 +145,7 @@ struct Row: Identifiable {
     private var previewPending = false
     /// No file operation is running and the current preview has been validated.
     var isIdle: Bool { state == .idle && (engine == nil || validatedGeneration == generation) }
-    var canRename: Bool { state == .idle && engine != nil && validatedGeneration == generation && !plan.isEmpty }
+    var canRename: Bool { state == .idle && !inlineEditing && engine != nil && validatedGeneration == generation && !plan.isEmpty }
     /// Valid renames once validated; until then, the proposed changes.
     var pendingCount: Int { validatedGeneration == generation ? plan.count : proposalCount }
     var renameTitle: String { ModelText.renameTitle(pendingCount) }
@@ -152,6 +158,9 @@ struct Row: Identifiable {
 
     private var inventory = Inventory()
     private var frozen = Set<String>()
+    /// Entries renamed in this session, like `Engine.completedPaths`, but kept after the
+    /// engine prunes their batch so a rescan never makes them pending again.
+    private var sessionCompleted: [String: Identity] = [:]
     var startupHealthy: Bool { engine != nil }
     private var engine: Engine?
     private var engineFailure: String?
@@ -178,7 +187,7 @@ struct Row: Identifiable {
 
     func beginInstallation() -> Bool {
         guard startupHealthy, state == .idle else { return false }
-        state = .installing
+        state = .installing; inlineEditing = false
         return true
     }
     func endInstallation() {
@@ -210,7 +219,7 @@ struct Row: Identifiable {
 
     func add(_ urls: [URL]) { add(urls, notes: []) }
     private func add(_ urls: [URL], notes: [String]) {
-        outcome = nil; self.notes = notes
+        if state == .applying || state == .undoing { queuedNotes += notes } else { outcome = nil; self.notes = notes }
         pendingURLs.append(contentsOf: urls)
         rebuild()
     }
@@ -223,7 +232,9 @@ struct Row: Identifiable {
         let skipped = items.count - valid.count
         let dropNotes = skipped > 0 ? [ModelText.droppedSkipped(skipped)] : []
         guard !valid.isEmpty else {
-            if skipped > 0 { outcome = nil; notes = dropNotes; message = dropNotes.joined(separator: " ") }
+            guard skipped > 0 else { return }
+            if state == .applying || state == .undoing { queuedNotes += dropNotes; return }
+            outcome = nil; notes = dropNotes; message = dropNotes.joined(separator: " ")
             return
         }
         add(valid, notes: dropNotes)
@@ -253,6 +264,7 @@ struct Row: Identifiable {
         plan = []; proposalCount = 0
         generation += 1; validatedGeneration = generation
         notes = []; outcome = ModelText.clearedList
+        inlineEditing = false
         message = engineFailure ?? ModelText.clearedList
     }
     private func resetNotes() { notes = []; outcome = nil }
@@ -299,11 +311,12 @@ struct Row: Identifiable {
     /// With companion files on, the group's other rows follow the newest edit. Their
     /// names are derived during preview, so later changes or reverts carry over.
     func setOverride(_ id: UUID, to name: String) {
-        guard state == .idle, let row = rows.first(where: { $0.id == id }), !row.done else { return }
+        guard namesEditable, let row = rows.first(where: { $0.id == id }), !row.done else { return }
         let k = key(row.entry)
         resetNotes()
         if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.utf8.elementsEqual(row.automatic.utf8) {
-            if overrides[k] != nil { overrides[k] = nil; editOrder[k] = nil } else { keepAutomatic.insert(k) }
+            // Only a row following a companion edit detaches; others have nothing to follow yet.
+            if overrides[k] != nil { overrides[k] = nil; editOrder[k] = nil } else if row.manual { keepAutomatic.insert(k) }
         } else {
             editCounter += 1
             overrides[k] = name; editOrder[k] = editCounter; keepAutomatic.remove(k)
@@ -314,7 +327,7 @@ struct Row: Identifiable {
         if !notes.isEmpty { message = notes.joined(separator: " ") }
     }
     func useAutomaticName(_ ids: Set<UUID>) {
-        guard state == .idle else { return }
+        guard namesEditable else { return }
         var changed = false
         for row in rows where ids.contains(row.id) && row.manual {
             let k = key(row.entry)
@@ -391,7 +404,8 @@ struct Row: Identifiable {
 
     private func refreshFrozen() {
         frozen = []
-        for (path, id) in engine?.completedPaths ?? [:] {
+        let completed = (engine?.completedPaths ?? [:]).merging(sessionCompleted) { recorded, _ in recorded }
+        for (path, id) in completed {
             // Content edits must not make a previously completed directory entry pending.
             // Move and undo validation still use the complete recorded identity.
             if let entry = try? Entry(path),
@@ -399,6 +413,17 @@ struct Row: Identifiable {
                entry.identity.birth == id.birth, entry.identity.nanos == id.nanos,
                entry.identity.kind == id.kind { frozen.insert(key(entry)) }
         }
+    }
+    /// Moves a completed path, and anything inside a completed folder, from one path to another.
+    private func moveCompleted(from source: String, to destination: String, identity: Identity?) {
+        if identity?.folder ?? sessionCompleted[source]?.folder ?? false {
+            for (path, id) in sessionCompleted where path.hasPrefix(source + "/") {
+                sessionCompleted[path] = nil
+                sessionCompleted[destination + path.dropFirst(source.count)] = id
+            }
+        }
+        sessionCompleted[source] = nil
+        sessionCompleted[destination] = identity
     }
     private func drainPending() {
         if rebuildPending || !pendingURLs.isEmpty { rebuild() }
@@ -487,8 +512,8 @@ struct Row: Identifiable {
         rows = updated
         plan = []
         proposalCount = proposals.count
-        let current = generation
-        guard !proposals.isEmpty else { finishValidation(PlanResult(items: [], problems: [:]), generation: current); return }
+        let current = generation, proposed = Set(proposals.map(\.entry.path))
+        guard !proposals.isEmpty else { finishValidation(PlanResult(items: [], problems: [:]), proposed: proposed, generation: current); return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self, current == self.generation, self.state == .idle else { return }
             let hook = self.beforeValidationForTesting
@@ -497,7 +522,7 @@ struct Row: Identifiable {
                 let result = Planner.plan(proposals: proposals)
                 DispatchQueue.main.async {
                     guard current == self.generation, self.state == .idle else { return }
-                    self.finishValidation(result, generation: current)
+                    self.finishValidation(result, proposed: proposed, generation: current)
                 }
             }
         }
@@ -511,15 +536,17 @@ struct Row: Identifiable {
         preview.deletion = ranges.replacement.length == 0 && ranges.source.length > 0
         return preview
     }
-    private func finishValidation(_ result: PlanResult, generation current: Int) {
+    /// Every proposed row takes this result's problem, so a resolved problem clears.
+    private func finishValidation(_ result: PlanResult, proposed: Set<String>, generation current: Int) {
         plan = result.items
-        if !result.problems.isEmpty {
-            var updated = rows
-            for i in updated.indices where !updated[i].done {
-                if let problem = result.problems[updated[i].entry.path] { updated[i].problem = problem; updated[i].problemName = updated[i].proposed }
-            }
-            rows = updated
+        var updated = rows, changed = false
+        for i in updated.indices where !updated[i].done && proposed.contains(updated[i].entry.path) {
+            let problem = result.problems[updated[i].entry.path]
+            guard updated[i].problem != problem || (problem != nil && updated[i].problemName != updated[i].proposed) else { continue }
+            updated[i].problem = problem; updated[i].problemName = problem == nil ? nil : updated[i].proposed
+            changed = true
         }
+        if changed { rows = updated }
         validatedGeneration = current
         composeMessage()
     }
@@ -593,12 +620,13 @@ struct Row: Identifiable {
         }
         rows = updated
         for k in oldKeys { overrides[k] = nil; editOrder[k] = nil; keepAutomatic.remove(k) }
+        for step in steps { moveCompleted(from: step.source, to: step.destination, identity: step.identity) }
         refreshFrozen()
         state = .idle
         refreshHistory()
         let renamed = files + folders
         let canUndo = undoAvailable && renamed > 0
-        notes = []
+        notes = queuedNotes; queuedNotes = []
         switch result {
         case .success(let outcome) where outcome.cancelled:
             self.outcome = ModelText.cancelled(renamed: outcome.renamed, total: outcome.total, undo: canUndo)
@@ -616,7 +644,7 @@ struct Row: Identifiable {
     func undoThrough(_ batch: UUID) { startUndo(through: batch) }
     private func startUndo(through batch: UUID?) {
         guard state == .idle, let engine, engine.canUndo else { return }
-        state = .undoing
+        state = .undoing; inlineEditing = false
         generation += 1
         let throttle = ProgressThrottle(), restored = Counter()
         worker.async {
@@ -637,10 +665,11 @@ struct Row: Identifiable {
         // Undo runs newest step first; replay that order to map rows back.
         let (updated, _, _) = remapPaths(undone.reversed(), reverse: true)
         rows = updated
+        for step in undone.reversed() { moveCompleted(from: step.destination, to: step.source, identity: nil) }
         refreshFrozen()
         state = .idle
         refreshHistory()
-        notes = []
+        notes = queuedNotes; queuedNotes = []
         switch result {
         case .success(let outcome): self.outcome = ModelText.restored(outcome.renamed)
         case .failure(let error):

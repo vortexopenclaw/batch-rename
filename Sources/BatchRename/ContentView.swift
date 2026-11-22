@@ -106,7 +106,8 @@ private struct Sidebar: View {
                         if model.hasSequenceToken {
                             HStack(spacing: 6) {
                                 Text("Start at")
-                                TextField("Start at", value: $model.operation.sequenceStart, format: .number)
+                                TextField("Start at", value: Binding(get: { model.operation.sequenceStart },
+                                                                     set: { model.operation.sequenceStart = Preset.clampedStart($0) }), format: .number)
                                     .labelsHidden().monospacedDigit().frame(width: 72)
                             }
                         }
