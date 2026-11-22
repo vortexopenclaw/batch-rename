@@ -2,6 +2,8 @@
 import XCTest
 import Combine
 import Foundation
+import AppKit
+import RenameCore
 
 /// Regressions for audited app-layer bugs, driven through the real `Model`.
 final class UIBugTests: ScratchTestCase {
@@ -123,6 +125,25 @@ final class UIBugTests: ScratchTestCase {
         XCTAssertEqual(model.message, "1 change ready. No files are overwritten.")
         model.apply(); try await waitForIdle(model)
         XCTAssertEqual(model.message, "Renamed 1 file.")
+    }
+
+    // MARK: Review findings
+
+    // R3: completed rows stay done after the engine prunes their batch from history.
+    @MainActor func testCompletedRowsStayDoneAfterHistoryIsPruned() async throws {
+        let model = makeModel(journalURL)
+        model.operation.text = "X"
+        for i in 0...Engine.maxBatches {
+            model.add([url(try file("f\(i).txt"))]); try await waitForIdle(model)
+            model.apply(); try await waitForIdle(model)
+        }
+        XCTAssertEqual(model.history.count, Engine.maxBatches)
+        model.operation.text = "Y"; model.rebuild(); try await waitForIdle(model)
+        XCTAssertEqual(model.rows.first { $0.entry.name == "f0X.txt" }?.done, true)
+        XCTAssertEqual(model.pendingCount, 0)
+        model.apply(); try await waitForIdle(model)
+        XCTAssertTrue(exists(root.appendingPathComponent("f0X.txt").path))
+        XCTAssertFalse(exists(root.appendingPathComponent("f0XY.txt").path))
     }
 }
 #endif

@@ -152,6 +152,9 @@ struct Row: Identifiable {
 
     private var inventory = Inventory()
     private var frozen = Set<String>()
+    /// Entries renamed in this session, like `Engine.completedPaths`, but kept after the
+    /// engine prunes their batch so a rescan never makes them pending again.
+    private var sessionCompleted: [String: Identity] = [:]
     var startupHealthy: Bool { engine != nil }
     private var engine: Engine?
     private var engineFailure: String?
@@ -391,7 +394,8 @@ struct Row: Identifiable {
 
     private func refreshFrozen() {
         frozen = []
-        for (path, id) in engine?.completedPaths ?? [:] {
+        let completed = (engine?.completedPaths ?? [:]).merging(sessionCompleted) { recorded, _ in recorded }
+        for (path, id) in completed {
             // Content edits must not make a previously completed directory entry pending.
             // Move and undo validation still use the complete recorded identity.
             if let entry = try? Entry(path),
@@ -399,6 +403,17 @@ struct Row: Identifiable {
                entry.identity.birth == id.birth, entry.identity.nanos == id.nanos,
                entry.identity.kind == id.kind { frozen.insert(key(entry)) }
         }
+    }
+    /// Moves a completed path, and anything inside a completed folder, from one path to another.
+    private func moveCompleted(from source: String, to destination: String, identity: Identity?) {
+        if identity?.folder ?? sessionCompleted[source]?.folder ?? false {
+            for (path, id) in sessionCompleted where path.hasPrefix(source + "/") {
+                sessionCompleted[path] = nil
+                sessionCompleted[destination + path.dropFirst(source.count)] = id
+            }
+        }
+        sessionCompleted[source] = nil
+        sessionCompleted[destination] = identity
     }
     private func drainPending() {
         if rebuildPending || !pendingURLs.isEmpty { rebuild() }
@@ -593,6 +608,7 @@ struct Row: Identifiable {
         }
         rows = updated
         for k in oldKeys { overrides[k] = nil; editOrder[k] = nil; keepAutomatic.remove(k) }
+        for step in steps { moveCompleted(from: step.source, to: step.destination, identity: step.identity) }
         refreshFrozen()
         state = .idle
         refreshHistory()
@@ -637,6 +653,7 @@ struct Row: Identifiable {
         // Undo runs newest step first; replay that order to map rows back.
         let (updated, _, _) = remapPaths(undone.reversed(), reverse: true)
         rows = updated
+        for step in undone.reversed() { moveCompleted(from: step.destination, to: step.source, identity: nil) }
         refreshFrozen()
         state = .idle
         refreshHistory()
