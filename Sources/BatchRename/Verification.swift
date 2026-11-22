@@ -31,5 +31,14 @@ enum Verification {
         engine = try Engine(journalURL: root.appendingPathComponent("journal/undo.json"))
         try engine!.undo()
         guard try Data(contentsOf: source) == Data("fixture".utf8) else { throw RenameError("Undo verification failed") }
+        // App layer: per-row planning keeps valid rows when one row has a problem, and edits reach companions.
+        let taken = root.appendingPathComponent("taken.mp4")
+        try Data("taken".utf8).write(to: taken)
+        let perRow = Planner.plan(proposals: [Proposal(entry: try Entry(source.path), name: "taken.mp4"), Proposal(entry: try Entry(duplicateURL.path), name: repaired)])
+        guard perRow.items.count == 1, perRow.problems[source.path] != nil else { throw RenameError("Per-row planning verification failed") }
+        let edited = "2026_1024_222430_004409F Pedestrians crossing at night in Seattle, T340.MP4"
+        guard CompanionEdit.propagate(automatic: "2026_1024_222430_004409F, T340.MP4", edited: edited, companion: "2026_1024_222430_004409R, T340.LRV")
+                == "2026_1024_222430_004409R Pedestrians crossing at night in Seattle, T340.LRV",
+              ModelText.renameTitle(1) == "Rename 1 Item" else { throw RenameError("App text verification failed") }
     }
 }
