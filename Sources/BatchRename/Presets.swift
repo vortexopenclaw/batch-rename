@@ -35,14 +35,35 @@ struct SettingsStore {
     let defaults: UserDefaults
     private enum Key {
         static let recent = "RecentTexts", presets = "Presets", companions = "IncludeCompanionFiles"
+        static let unreadablePresets = "PresetsUnreadable"
     }
     var recentTexts: [String] {
         get { defaults.stringArray(forKey: Key.recent) ?? [] }
         nonmutating set { defaults.set(Array(newValue.prefix(Self.recentLimit)), forKey: Key.recent) }
     }
+    /// Presets decode one at a time; entries this version cannot read are kept as stored.
     var presets: [Preset] {
-        get { defaults.data(forKey: Key.presets).flatMap { try? JSONDecoder().decode([Preset].self, from: $0) } ?? [] }
-        nonmutating set { defaults.set(try? JSONEncoder().encode(newValue), forKey: Key.presets) }
+        get { storedPresets().valid }
+        nonmutating set {
+            let stored = storedPresets()
+            // Never overwrite data that is not a readable list; set it aside first.
+            if !stored.readable, let data = defaults.data(forKey: Key.presets) { defaults.set(data, forKey: Key.unreadablePresets) }
+            let items = newValue.compactMap { preset in
+                (try? JSONEncoder().encode(preset)).flatMap { try? JSONSerialization.jsonObject(with: $0) }
+            } + stored.unknown
+            guard let data = try? JSONSerialization.data(withJSONObject: items) else { return }
+            defaults.set(data, forKey: Key.presets)
+        }
+    }
+    private func storedPresets() -> (valid: [Preset], unknown: [Any], readable: Bool) {
+        guard let data = defaults.data(forKey: Key.presets) else { return ([], [], true) }
+        guard let items = try? JSONSerialization.jsonObject(with: data) as? [Any] else { return ([], [], false) }
+        var valid: [Preset] = [], unknown: [Any] = []
+        for item in items {
+            if let json = try? JSONSerialization.data(withJSONObject: item, options: .fragmentsAllowed),
+               let preset = try? JSONDecoder().decode(Preset.self, from: json) { valid.append(preset) } else { unknown.append(item) }
+        }
+        return (valid, unknown, true)
     }
     var companions: Bool {
         get { defaults.bool(forKey: Key.companions) }

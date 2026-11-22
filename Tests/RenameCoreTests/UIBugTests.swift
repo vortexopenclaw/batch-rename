@@ -258,5 +258,27 @@ final class UIBugTests: ScratchTestCase {
         model.receiveDrop([nil]); try await waitForIdle(model)
         XCTAssertTrue(model.message.contains("1 dropped item was skipped"), model.message)
     }
+
+    // One unreadable preset never drops the others, and unknown entries are kept.
+    @MainActor func testOneUnreadablePresetKeepsTheRest() async throws {
+        let defaults = scratchDefaults()
+        let good = try JSONSerialization.jsonObject(with: JSONEncoder().encode(Preset(name: "Good", operation: operation(" ok"))))
+        var bad = try XCTUnwrap(good as? [String: Any]); bad["name"] = "Future"; bad["action"] = "teleport"
+        defaults.set(try JSONSerialization.data(withJSONObject: [good, bad]), forKey: "Presets")
+        let model = makeModel(journalURL, defaults: defaults)
+        XCTAssertEqual(model.presets.map(\.name), ["Good"])
+        model.savePreset(named: "New")
+        let stored = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(defaults.data(forKey: "Presets"))) as? [[String: Any]])
+        XCTAssertEqual(stored.map { $0["name"] as? String }, ["Good", "New", "Future"])
+        XCTAssertEqual(stored.last?["action"] as? String, "teleport")
+        XCTAssertEqual(SettingsStore(defaults: defaults).presets.map(\.name), ["Good", "New"])
+        // Stored data that is not a list at all is set aside, not overwritten.
+        defaults.set(Data("not json".utf8), forKey: "Presets")
+        let fresh = makeModel(journalURL.deletingLastPathComponent().appendingPathComponent("other/undo.json"), defaults: defaults)
+        XCTAssertTrue(fresh.presets.isEmpty)
+        fresh.savePreset(named: "Fresh")
+        XCTAssertEqual(defaults.data(forKey: "PresetsUnreadable"), Data("not json".utf8))
+        XCTAssertEqual(SettingsStore(defaults: defaults).presets.map(\.name), ["Fresh"])
+    }
 }
 #endif
