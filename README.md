@@ -23,9 +23,8 @@ export BATCH_RENAME_SCRATCH="$HOME/Developer/BatchRenameScratch"
 mkdir -p "$BATCH_RENAME_SCRATCH"
 source scripts/env.sh
 bash scripts/test-direct.sh
-python3 scripts/test-publish-update.py
 python3 scripts/test-release-update.py
-node --test workers/batch-rename/worker.test.mjs
+node --test workers/batch-rename/*.test.mjs
 ```
 
 Scratch selection uses `BATCH_RENAME_SCRATCH`, then an optional ignored `.env.scratch` file containing one directory path, then `TMPDIR`. Compiler caches stay in the checkout. Direct XCTest compiles the app model without running the app entry point and exercises real fixture renames and undo.

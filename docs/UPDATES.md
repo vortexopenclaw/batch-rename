@@ -12,39 +12,13 @@ The stage is on the installation volume in a unique `.batch-rename-update-UUID` 
 
 The new app acknowledges only after the window appears, the normal journal opens successfully, bundle identity and code signature pass, and the transaction token matches. The helper waits 60 seconds. A timeout writes `NEEDS-RECOVERY.txt` and keeps both apps: it does not race a possibly running new app by replacing it. Backups are retained even after success. No automatic backup deletion or cleanup runs.
 
-## Public setup (local, no remote changes)
-
-Supply an actual dedicated R2 bucket name, chosen HTTPS Worker origin, route prefix (default `/batch-rename`), and a Batch Rename Ed25519 public key as base64 raw 32 bytes. Generate/manage the corresponding private key through your existing approved signing process; do not paste it into chat or commit it. Use a dedicated trust key and bucket.
-
-```sh
-python3 scripts/configure-updates.py --origin "$BATCH_RENAME_ORIGIN" \
-  --route /batch-rename --bucket "$BATCH_RENAME_BUCKET" \
-  --public-key "$BATCH_RENAME_PUBLIC_KEY"
-```
-
-This writes only `Resources/UpdateConfiguration.json` and `workers/batch-rename/wrangler.json`. Review and include these public files before building. Worker routes are exactly `<prefix>/manifest.json` and `<prefix>/download`; no arbitrary R2 path proxy or write route exists. Worker binding `RELEASES` must refer only to the dedicated bucket. Configure the real account and optional custom-domain route through existing approved Wrangler authentication/configuration; no account ID is invented here. The generated workers.dev deployment uses the origin you supply; make sure it actually matches, or configure the custom domain before distributing any build.
-
 ## Release and hosting automation (maintainer-run only)
 
 `.github/workflows/batch-rename-release.yml` is manual dispatch, with a reviewed existing version tag, a protected `batch-rename-release` environment and a dedicated ephemeral Apple Silicon runner labeled `batch-rename-release` with Xcode at `/Applications/Xcode.app`. Configure environment approval/allowed refs before use. Use the existing GitHub repository, with its dedicated release pipeline. It grants only repository `contents: write`, keeps checkout credentials out of the checkout, tests, packages, bundles public config, signs the manifest, and creates a **draft** GitHub release. Set `BATCH_RENAME_ED25519_PRIVATE_KEY` in that protected environment via the approved secret-management UI/auth flow (base64 raw 32-byte seed). The signer accepts it on stdin and checks that its public key matches the bundled configuration. No Cloudflare credentials are present in the GitHub job. No workflow has been dispatched here.
 
 Before dispatch, update `Resources/Info.plist` version/build; the tag must equal `v` plus that version. Every update must increase the three-component version (build-only updates are intentionally rejected). Runner needs Python 3, Swift/Xcode, Node and GitHub CLI. `BATCH_RENAME_SCRATCH` lets CI select a physical writable scratch directory; local default is unchanged. Keep source/ref changes subject to review because release code can access the scoped signing secret.
 
-For Cloudflare, the maintainer reviews and deploys `workers/batch-rename/worker.mjs` using existing Wrangler auth, scoped to the selected account/Worker. The bucket must already exist. Use a bucket-limited R2 write credential for object publishing where supported, or an approved existing authentication flow with equivalent scope. Do not inspect caches or auth stores. The Worker uses the [R2 binding API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/); publishing uses [Wrangler R2 object commands](https://developers.cloudflare.com/r2/reference/wrangler-commands/). GitHub permissions follow [workflow permission rules](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax).
-
-After downloading the draft GitHub release assets into a local directory, build the verifier against the same reviewed configuration:
-
-```sh
-source scripts/env.sh
-swiftc -I build -L build -lRenameCore -Xlinker -rpath -Xlinker "$PWD/build" \
-  scripts/verify-release.swift -o build/verify-release
-python3 scripts/publish-update.py path/to/release-assets
-# Only after review, parent explicitly executes remote mutations:
-# wrangler deploy --config workers/batch-rename/wrangler.json
-# python3 scripts/publish-update.py path/to/release-assets --publish
-```
-
-The default publishing command only verifies and prints the scoped plan. `--publish` uploads immutable version-named ZIP first, then `batch-rename/manifest.json` last. Do not reuse version/build pairs or overwrite their ZIPs. Publish the GitHub draft through the existing approved release process. The live Worker does not rely on GitHub redirects or GitHub authentication.
+Production delivery and the release runbook are in [HOSTING.md](HOSTING.md).
 
 ## Verification and exact limits
 

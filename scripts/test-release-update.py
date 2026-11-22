@@ -138,5 +138,23 @@ class ReleaseMetadataCheckTests(unittest.TestCase):
                 self.assertNotEqual(self.run_check('previous-identity', str(manifest)).returncode, 0)
 
 
+class LegacyDeliveryRemovedTests(unittest.TestCase):
+    ROOT = pathlib.Path(__file__).resolve().parents[1]
+    REMOVED = ['workers/batch-rename/worker.mjs', 'workers/batch-rename/worker.test.mjs', 'scripts/publish-update.py',
+               'scripts/test-publish-update.py', 'scripts/configure-updates.py']
+
+    def test_r2_publisher_and_trust_anchor_writer_are_gone(self):
+        # configure-updates.py could overwrite the production trust anchor; publish-update.py needed an absent config.
+        for path in self.REMOVED:
+            self.assertFalse((self.ROOT / path).exists(), path)
+        tracked = subprocess.run(['git', 'ls-files'], cwd=self.ROOT, capture_output=True, text=True, check=True).stdout.split()
+        for name in tracked:
+            if name == 'scripts/test-release-update.py' or not (self.ROOT / name).is_file():
+                continue
+            text = (self.ROOT / name).read_text(errors='ignore')
+            for removed in self.REMOVED:
+                self.assertNotIn(pathlib.PurePosixPath(removed).name, text, f'{name} still references {removed}')
+
+
 if __name__ == '__main__':
     unittest.main()
