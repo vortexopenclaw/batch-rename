@@ -236,6 +236,8 @@ struct PreviewTable: NSViewRepresentable {
         coordinator.updating = true
         defer { coordinator.updating = false }
         table.locked = model.controlsLocked
+        // Undo and installation close an open editor; its edit would be refused.
+        if coordinator.editor != nil && (!model.inlineEditing || !model.namesEditable) { coordinator.endEditing(commit: false) }
         if coordinator.version != model.rowsVersion {
             coordinator.version = model.rowsVersion
             table.reloadData()

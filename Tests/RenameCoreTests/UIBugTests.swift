@@ -213,5 +213,33 @@ final class UIBugTests: ScratchTestCase {
         model.clear()
         XCTAssertFalse(model.inlineEditing)
     }
+
+    // R4: inline edits during a scan are kept; locked operations end the editor.
+    @MainActor func testInlineEditDuringScanIsKept() async throws {
+        let a = try file("a.txt"), b = try file("b.txt")
+        let model = makeModel(journalURL)
+        model.operation.text = "X"
+        model.add([url(a)]); try await waitForIdle(model)
+        let id = model.rows[0].id
+        model.add([url(b)]); XCTAssertEqual(model.state, .scanning)
+        model.setOverride(id, to: "a edited.txt"); try await waitForIdle(model)
+        XCTAssertEqual(model.rows.first { $0.id == id }?.proposed, "a edited.txt")
+        model.rebuild(); XCTAssertEqual(model.state, .scanning)
+        model.useAutomaticName([id]); try await waitForIdle(model)
+        XCTAssertEqual(model.rows.first { $0.id == id }?.proposed, "aX.txt")
+        // Still refused while installing, and an open editor closes.
+        let coordinator = PreviewTable.Coordinator(model)
+        let table = PreviewTable.makeScroll(coordinator: coordinator).documentView as! PreviewNativeTable
+        PreviewTable.sync(table, coordinator: coordinator, model: model)
+        coordinator.beginEditing(row: 0, in: table)
+        XCTAssertNotNil(coordinator.editor)
+        XCTAssertTrue(model.beginInstallation())
+        model.setOverride(id, to: "nope.txt")
+        PreviewTable.sync(table, coordinator: coordinator, model: model)
+        XCTAssertNil(coordinator.editor)
+        XCTAssertFalse(model.inlineEditing)
+        model.endInstallation(); try await waitForIdle(model)
+        XCTAssertEqual(model.rows.first { $0.id == id }?.proposed, "aX.txt")
+    }
 }
 #endif

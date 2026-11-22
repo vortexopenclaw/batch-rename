@@ -119,6 +119,8 @@ struct Row: Identifiable {
     var busy: Bool { state == .scanning || state == .applying || state == .undoing }
     var installing: Bool { state == .installing }
     var controlsLocked: Bool { state != .idle }
+    /// Hand edits are accepted while idle or scanning; preview waits for the scan.
+    var namesEditable: Bool { state == .idle || state == .scanning }
     var canCancel: Bool { state == .applying }
     @Published var message = ModelText.dropToBegin
     /// Paths and errors behind the last scan's summary, for the message tooltip.
@@ -183,7 +185,7 @@ struct Row: Identifiable {
 
     func beginInstallation() -> Bool {
         guard startupHealthy, state == .idle else { return false }
-        state = .installing
+        state = .installing; inlineEditing = false
         return true
     }
     func endInstallation() {
@@ -305,7 +307,7 @@ struct Row: Identifiable {
     /// With companion files on, the group's other rows follow the newest edit. Their
     /// names are derived during preview, so later changes or reverts carry over.
     func setOverride(_ id: UUID, to name: String) {
-        guard state == .idle, let row = rows.first(where: { $0.id == id }), !row.done else { return }
+        guard namesEditable, let row = rows.first(where: { $0.id == id }), !row.done else { return }
         let k = key(row.entry)
         resetNotes()
         if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.utf8.elementsEqual(row.automatic.utf8) {
@@ -321,7 +323,7 @@ struct Row: Identifiable {
         if !notes.isEmpty { message = notes.joined(separator: " ") }
     }
     func useAutomaticName(_ ids: Set<UUID>) {
-        guard state == .idle else { return }
+        guard namesEditable else { return }
         var changed = false
         for row in rows where ids.contains(row.id) && row.manual {
             let k = key(row.entry)
@@ -638,7 +640,7 @@ struct Row: Identifiable {
     func undoThrough(_ batch: UUID) { startUndo(through: batch) }
     private func startUndo(through batch: UUID?) {
         guard state == .idle, let engine, engine.canUndo else { return }
-        state = .undoing
+        state = .undoing; inlineEditing = false
         generation += 1
         let throttle = ProgressThrottle(), restored = Counter()
         worker.async {
