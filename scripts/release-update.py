@@ -3,8 +3,11 @@
 import hashlib, json, pathlib, plistlib, re, stat, sys, zipfile
 app = pathlib.Path(sys.argv[1]); output = pathlib.Path(sys.argv[2]); output.mkdir(parents=True, exist_ok=True)
 info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+# Components without leading zeros, matching UpdatePolicy.version in the app.
+# [0-9], not \d: Python's \d also matches non-ASCII digits.
+COMPONENT = r'(?:0|[1-9][0-9]*)'
 minimum = info.get('LSMinimumSystemVersion')
-if not isinstance(minimum, str) or not re.fullmatch(r'[0-9]+\.[0-9]+(?:\.[0-9]+)?', minimum):
+if not isinstance(minimum, str) or not re.fullmatch(COMPONENT + r'\.' + COMPONENT + r'(?:\.' + COMPONENT + r')?', minimum):
     raise ValueError('Invalid or missing LSMinimumSystemVersion')
 parts = [int(part) for part in minimum.split('.')]
 if any(part > sys.maxsize for part in parts):
@@ -12,7 +15,10 @@ if any(part > sys.maxsize for part in parts):
 minimum = '.'.join(str(part) for part in parts + ([0] if len(parts) == 2 else []))
 config = json.loads((app / 'Contents/Resources/UpdateConfiguration.json').read_text())
 version, build = info['CFBundleShortVersionString'], info['CFBundleVersion']
-assert all(c.isdigit() or c == '.' for c in version) and build.isdigit()
+if not isinstance(version, str) or not re.fullmatch(COMPONENT + r'(?:\.' + COMPONENT + r'){2}', version):
+    raise ValueError('CFBundleShortVersionString must be three components without leading zeros')
+if not isinstance(build, str) or not re.fullmatch(r'[1-9][0-9]*', build):
+    raise ValueError('CFBundleVersion must be a positive integer without leading zeros')
 asset = f'batch-rename-{version.replace(".", "_")}-{build}.zip'
 with zipfile.ZipFile(output / asset, 'w', compression=zipfile.ZIP_STORED, allowZip64=False) as z:
     for path in sorted(app.rglob('*')):

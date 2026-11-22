@@ -38,8 +38,8 @@ class ReviewRulesTests(unittest.TestCase):
         cls.paths = [
             'Sources/RenameCore/Core.swift', 'Sources/RenameCore/Updater.swift',
             'Sources/BatchRename/App.swift', 'Sources/BatchRename/AppUpdater.swift',
-            'Tests/RenameCoreTests/CoreTests.swift', 'scripts/test-publish-update.py',
-            'workers/batch-rename/worker.test.mjs', 'workers/batch-rename/worker.mjs',
+            'Tests/RenameCoreTests/CoreTests.swift', 'scripts/test-release-update.py',
+            'workers/batch-rename/github-updates.test.mjs', 'workers/batch-rename/github-updates.mjs',
             'Resources/Info.plist', 'README.md', 'docs/UPDATES.md',
             '.env.scratch', 'release-assets/archive.json', 'build/generated.swift',
             'dist-next-v012/generated.swift', 'private.key', 'SAFETY-REVIEW.md',

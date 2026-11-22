@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 
 public struct UpdateConfiguration: Codable {
     public let manifestURL: URL
@@ -19,20 +20,154 @@ public struct UpdateConfiguration: Codable {
 
 /// Redirects are rejected: only the two explicitly configured HTTPS endpoints are contacted.
 public final class UpdateFetcher: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    public let userAgent: String
+    public init(userAgent: String) { self.userAgent = userAgent }
+    public convenience init(bundle: Bundle = .main) { self.init(userAgent: Self.userAgent(info: bundle.infoDictionary)) }
+    /// Identifies the running bundle; malformed metadata is reported as `unknown`, never copied into the header.
+    public static func userAgent(info: [String: Any]?) -> String {
+        let version = (info?["CFBundleShortVersionString"] as? String).flatMap { UpdatePolicy.version($0) != nil ? $0 : nil } ?? "unknown"
+        let build = (info?["CFBundleVersion"] as? String).flatMap { !$0.isEmpty && $0.utf8.allSatisfy({ (48...57).contains($0) }) ? $0 : nil } ?? "unknown"
+        return "BatchRename/\(version) (\(build)) CFNetwork/Darwin"
+    }
     public func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
-    public func fetch(_ url: URL, limit: Int, configuration: URLSessionConfiguration = .ephemeral) async throws -> Data {
+    func open(_ url: URL, limit: Int, configuration: URLSessionConfiguration) async throws -> (URLSession.AsyncBytes, URLSession) {
         guard url.scheme == "https" else { throw RenameError("HTTPS is required") }
         configuration.timeoutIntervalForRequest = 30; configuration.timeoutIntervalForResource = 180
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
         var request = URLRequest(url: url)
-        request.setValue("BatchRename/0.1.1 CFNetwork/Darwin", forHTTPHeaderField: "User-Agent")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("application/json, application/zip, application/octet-stream", forHTTPHeaderField: "Accept")
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200, response.expectedContentLength <= limit else { throw RenameError("Update download rejected") }
+        do {
+            let (bytes, response) = try await session.bytes(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200, response.expectedContentLength <= limit else { throw RenameError("Update download rejected") }
+            return (bytes, session)
+        } catch { session.invalidateAndCancel(); throw error }
+    }
+    public func fetch(_ url: URL, limit: Int, configuration: URLSessionConfiguration = .ephemeral) async throws -> Data {
+        let (bytes, session) = try await open(url, limit: limit, configuration: configuration)
+        defer { session.invalidateAndCancel() }
         var data = Data()
         for try await byte in bytes { guard data.count < limit else { throw RenameError("Update exceeds size limit") }; data.append(byte) }
         return data
+    }
+}
+
+extension UpdateFetcher {
+    /// Streams to a new owner-only file while hashing, so memory stays bounded by one chunk.
+    /// Returns the lowercase hex SHA-256. Refuses existing paths and links; removes partial output on failure.
+    public func download(_ url: URL, to file: URL, limit: Int, configuration: URLSessionConfiguration = .ephemeral) async throws -> String {
+        let descriptor = Darwin.open(file.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw RenameError("Cannot create update download file: \(errno)") }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        do {
+            let (bytes, session) = try await open(url, limit: limit, configuration: configuration)
+            defer { session.invalidateAndCancel() }
+            var hasher = SHA256(), buffer = Data(), total = 0
+            let chunk = 64 * 1024
+            buffer.reserveCapacity(chunk)
+            func flush() throws { hasher.update(data: buffer); try handle.write(contentsOf: buffer); buffer.removeAll(keepingCapacity: true) }
+            for try await byte in bytes {
+                total += 1
+                guard total <= limit else { throw RenameError("Update exceeds size limit") }
+                buffer.append(byte)
+                if buffer.count == chunk { try flush() }
+            }
+            try flush()
+            try handle.close()
+            return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        } catch {
+            try? handle.close()
+            unlink(file.path)
+            throw error
+        }
+    }
+}
+
+/// Hidden `.batch-rename-update-UUID` directories beside the app.
+public enum UpdateTransactions {
+    public static let prefix = ".batch-rename-update-"
+    /// Refuses translocated, linked, or unwritable installations before anything is downloaded.
+    public static func checkInstallLocation(_ original: URL) throws {
+        try UpdateInstaller.physical(original)
+        let parent = original.deletingLastPathComponent()
+        guard original.pathExtension == "app", !original.path.contains("/AppTranslocation/"),
+              access(parent.path, W_OK) == 0, access(original.path, W_OK) == 0 else { throw RenameError("Move the app to a writable installation folder before updating.") }
+    }
+    /// Creates a private transaction holding only the authenticated `release.zip`.
+    /// The parent validates a scratch extraction and deletes it; the helper extracts again.
+    /// Any failure removes the whole transaction, since no helper can be using it yet.
+    public static func prepare(original: URL, manifest: UpdateManifest, download: (URL) async throws -> String) async throws -> URL {
+        try checkInstallLocation(original)
+        let transaction = original.deletingLastPathComponent().appendingPathComponent(prefix + UUID().uuidString)
+        try FileManager.default.createDirectory(at: transaction, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        do {
+            let archive = transaction.appendingPathComponent("release.zip")
+            guard try await download(archive) == manifest.sha256 else { throw RenameError("Update checksum mismatch.") }
+            let stage = transaction.appendingPathComponent("stage")
+            try UpdateArchive.extract(Data(contentsOf: archive, options: .alwaysMapped), to: stage)
+            try UpdateInstaller.validateBundle(stage.appendingPathComponent("Batch Rename.app"), manifest: manifest)
+            try FileManager.default.removeItem(at: stage)
+            return transaction
+        } catch {
+            discard(transaction)
+            throw error
+        }
+    }
+    /// Fields of the app's `plan.json` (written by this and earlier helpers) used for housekeeping.
+    struct Record: Decodable { let original: URL; let transaction: URL; let token: String; let manifest: UpdateManifest }
+    static let recoveryMarker = "NEEDS-RECOVERY.txt"
+    static func same(_ a: URL, _ b: URL) -> Bool { a.standardizedFileURL.path == b.standardizedFileURL.path }
+    /// Physical transactions beside `original` whose plan names this app and this directory.
+    static func records(original: URL) -> [(URL, Record)] {
+        let parent = original.deletingLastPathComponent()
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: parent.path) else { return [] }
+        return names.filter { $0.hasPrefix(prefix) }.compactMap { name in
+            let directory = parent.appendingPathComponent(name, isDirectory: true)
+            var metadata = stat()
+            guard lstat(directory.path, &metadata) == 0, metadata.st_mode & UInt16(S_IFMT) == UInt16(S_IFDIR), (try? UpdateInstaller.physical(directory)) != nil,
+                  let data = try? Data(contentsOf: directory.appendingPathComponent("plan.json")),
+                  let record = try? JSONDecoder().decode(Record.self, from: data),
+                  same(record.original, original), same(record.transaction, directory) else { return nil }
+            return (directory, record)
+        }
+    }
+    static func needsRecovery(_ directory: URL) -> Bool { FileManager.default.fileExists(atPath: directory.appendingPathComponent(recoveryMarker).path) }
+    /// After a healthy launch: keep only the newest acknowledged transaction, trimmed to its backup
+    /// and records. Unacknowledged, recovery-flagged, foreign, or unreadable transactions are never touched.
+    public static func cleanUpAfterHealthyLaunch(original: URL) {
+        let acknowledged = records(original: original).compactMap { directory, record -> (URL, Date)? in
+            guard UpdateHealth.confirmed(at: directory, token: record.token), !needsRecovery(directory),
+                  let date = (try? FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent("healthy").path))?[.modificationDate] as? Date else { return nil }
+            return (directory, date)
+        }.sorted { $0.1 > $1.1 }
+        guard let newest = acknowledged.first?.0 else { return }
+        for remnant in ["release.zip", "install", "stage"] { try? FileManager.default.removeItem(at: newest.appendingPathComponent(remnant)) }
+        for (older, _) in acknowledged.dropFirst() { try? FileManager.default.removeItem(at: older) }
+    }
+    /// Clears the recovery marker when the running app is the acknowledged result of that transaction
+    /// (for example, the helper timed out before a slow but successful startup acknowledged).
+    public static func clearResolvedRecovery(original: URL, runningVersion: String?, runningBuild: String?) {
+        for (directory, record) in records(original: original) where needsRecovery(directory) {
+            guard UpdateHealth.confirmed(at: directory, token: record.token),
+                  UpdatePolicy.sameVersion(record.manifest.version, runningVersion), record.manifest.build == runningBuild else { continue }
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(recoveryMarker))
+        }
+    }
+    public static func recoveryNotices(original: URL) -> [(transaction: URL, notice: String)] {
+        records(original: original).compactMap { directory, _ in
+            guard let notice = try? String(contentsOf: directory.appendingPathComponent(recoveryMarker), encoding: .utf8) else { return nil }
+            return (directory, notice)
+        }
+    }
+    /// Removes only the notice. Backups and every other recovery file stay in place.
+    public static func dismissRecovery(_ transaction: URL, original: URL) throws {
+        guard records(original: original).contains(where: { same($0.0, transaction) }) else { throw RenameError("Not an update transaction for this app") }
+        try FileManager.default.removeItem(at: transaction.appendingPathComponent(recoveryMarker))
+    }
+    /// Removes a transaction that no helper has been given.
+    public static func discard(_ transaction: URL) {
+        guard transaction.lastPathComponent.hasPrefix(prefix), (try? UpdateInstaller.physical(transaction)) != nil else { return }
+        try? FileManager.default.removeItem(at: transaction)
     }
 }
 
@@ -99,7 +234,7 @@ public enum UpdateInstaller {
         let info = app.appendingPathComponent("Contents/Info.plist")
         guard let dict = try PropertyListSerialization.propertyList(from: Data(contentsOf: info), format: nil) as? [String: Any],
               dict["CFBundleIdentifier"] as? String == manifest.bundleIdentifier,
-              dict["CFBundleShortVersionString"] as? String == manifest.version,
+              UpdatePolicy.sameVersion(dict["CFBundleShortVersionString"] as? String, manifest.version),
               dict["CFBundleVersion"] as? String == manifest.build,
               dict["CFBundleExecutable"] as? String == "BatchRename" else { throw RenameError("Update bundle identity mismatch") }
         guard let minimum = minimumMacOS(dict["LSMinimumSystemVersion"]),
@@ -110,7 +245,8 @@ public enum UpdateInstaller {
     public static func physical(_ url: URL) throws {
         guard url.path == url.resolvingSymlinksInPath().standardizedFileURL.path else { throw RenameError("Update paths must not contain symbolic links") }
     }
-    /// Backup is never deleted automatically, including after acknowledgment.
+    /// Never deletes the backup. Only `UpdateTransactions.cleanUpAfterHealthyLaunch` prunes
+    /// backups, and only for older acknowledged transactions.
     public static func replace(original: URL, staged: URL, backup: URL, launch: () throws -> Void) throws {
         for url in [original, staged, backup] { try physical(url) }
         guard !FileManager.default.fileExists(atPath: backup.path) else { throw RenameError("Backup already exists") }

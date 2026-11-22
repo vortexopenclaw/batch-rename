@@ -22,11 +22,13 @@ Use Xcode with Swift, Python 3, and Node. From the repository root, select an ex
 export BATCH_RENAME_SCRATCH="$HOME/Developer/BatchRenameScratch"
 mkdir -p "$BATCH_RENAME_SCRATCH"
 source scripts/env.sh
+python3 scripts/release-metadata.py readme
 bash scripts/test-direct.sh
-python3 scripts/test-publish-update.py
 python3 scripts/test-release-update.py
-node --test workers/batch-rename/worker.test.mjs
+node --test workers/batch-rename/*.test.mjs
 ```
+
+After packaging (below) to `build/Batch Rename.app`, `bash scripts/test-update-bundle.sh` runs the release tools on a copy of the real app with a throwaway signing key: `sign-update`, `verify-release`, archive extraction, and `codesign` validation.
 
 Scratch selection uses `BATCH_RENAME_SCRATCH`, then an optional ignored `.env.scratch` file containing one directory path, then `TMPDIR`. Compiler caches stay in the checkout. Direct XCTest compiles the app model without running the app entry point and exercises real fixture renames and undo.
 
@@ -40,7 +42,7 @@ Output is `dist-next-v012/Batch Rename.app`, ad-hoc signed without Developer ID 
 
 ## Updates and validation limits
 
-The updater implements authenticated manifests, archive validation, staged installation and recovery. The parent-managed public configuration is bundled unchanged. The configured service is at `https://batch-rename-updates.vortexradar.workers.dev/batch-rename/manifest.json` and `/batch-rename/download`. Startup checks once per launch and stays silent when offline or up to date; manual checks report results. A valid newer release offers **Install and Restart** or **Later** after file operations finish and the rename engine is healthy. Installation blocks new file operations. Live graphical installation, relaunch and downloaded-app validation remain unqualified. See [update setup and recovery](docs/UPDATES.md).
+The updater accepts only releases signed by the bundled Ed25519 key, from `https://batch-rename-updates.vortexradar.workers.dev/batch-rename/manifest.json` and `/batch-rename/download`. Startup checks once per launch and stays silent when offline or up to date; manual checks report results. A valid newer release offers **Install and Restart** or **Later** after file operations finish and the rename engine is healthy. The app must run from a writable folder, not App Translocation. Installation blocks new file operations, keeps the previous app as a backup, and after a healthy relaunch keeps only the newest backup. Manifests carry a legacy signature for installed 0.1.x clients and a strict signed envelope with rollback detection for current clients. Live graphical installation, relaunch, and downloaded-app validation remain unqualified. See [updater behavior and limits](docs/UPDATES.md) and the [release runbook](docs/HOSTING.md).
 
 The GUI lifecycle harness is disabled by default. Its `--allow-gui-lifecycle` flag explicitly enables app and installer launches and requires separate interactive authorization. Do not run it during headless testing. Changing app signatures can cause macOS to request file access again.
 

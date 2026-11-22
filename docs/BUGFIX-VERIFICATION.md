@@ -1,4 +1,6 @@
-# Bug-fix verification
+# Bug-fix verification record: 0.1.3
+
+> Historical record of the 0.1.3 (build 4) verification pass, kept as it was observed. It is not maintained. Commands and counts below reflect that release, including the since-removed legacy R2 Worker and publisher. For current behavior see [UPDATES.md](UPDATES.md); for the release procedure see [HOSTING.md](HOSTING.md).
 
 This local, unreleased pass repairs the initial advisory-review finding and additional defects confirmed by isolated headless reproductions. The pre-existing removal of a UI explanatory label is preserved.
 
@@ -10,7 +12,6 @@ This local, unreleased pass repairs the initial advisory-review finding and addi
 - **Directory-entry aliases:** Inventory deduplication uses parent identity and the filesystem-reported entry name, not a guessed case-folding policy or inode alone. Alternate-case selections merge while distinct hardlinks and symlinks remain separate.
 - **Minimum macOS:** Release generation derives and normalizes the minimum from packaged `LSMinimumSystemVersion`. Missing or malformed values fail before archiving. Candidate bundle validation rejects disagreement with the authenticated manifest before codesign or replacement. Existing OS policy checks remain in place.
 - **Malformed Worker manifests:** Both delivery implementations reject null, scalar, array, and wrong-type metadata with controlled failures before archive access.
-- **Legacy publisher collision:** New archives have full SHA-256 content-addressed names. The legacy R2 publisher snapshots local inputs and refuses to create unaddressed keys. Competing supported publishers cannot put different bytes at one content-addressed key. Existing legacy archives can still be verified and reused. This is not a storage-level write-once guarantee against out-of-band credential holders. Production delivery remains GitHub-backed.
 
 ## Executed checks
 
@@ -20,7 +21,6 @@ Use an existing dedicated writable scratch directory outside system `/tmp`, then
 export BATCH_RENAME_SCRATCH="$HOME/Developer/BatchRenameScratch"
 source scripts/env.sh
 bash scripts/test-direct.sh
-python3 scripts/test-publish-update.py
 python3 scripts/test-release-update.py
 python3 scripts/test-review-rules.py
 bash scripts/test-update-bundle.sh
