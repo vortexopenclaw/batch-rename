@@ -1,4 +1,4 @@
-# Batch Rename 0.1.3 (build 4)
+# Batch Rename 0.1.4 (build 5)
 
 A native macOS utility for renaming files and folders locally, with a live preview and durable undo. Requires macOS 14 or later and Apple Silicon.
 
