@@ -4,10 +4,10 @@ Use OpenCodeReview (OCR) for deterministic file selection and rule resolution, a
 
 ## Setup and configuration checks
 
-The qualified CLI version is **1.13.10**. Install it in the development environment, not the app:
+The qualified CLI version is **1.14.1**. Install it in the development environment, not the app:
 
 ```sh
-npm install -g @alibaba-group/open-code-review@1.13.10
+npm install -g @alibaba-group/open-code-review@1.14.1
 ocr --version
 python3 scripts/test-review-rules.py
 ```

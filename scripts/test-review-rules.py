@@ -21,10 +21,10 @@ class ReviewRulesTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if shutil.which('ocr') is None:
-            raise RuntimeError('Install @alibaba-group/open-code-review@1.13.10 first')
+            raise RuntimeError('Install @alibaba-group/open-code-review@1.14.1 first')
         version = run('ocr', '--version')
-        if ' v1.13.10 ' not in version:
-            raise RuntimeError('These checks qualify OCR v1.13.10 only')
+        if ' v1.14.1 ' not in version:
+            raise RuntimeError('These checks qualify OCR v1.14.1 only')
         scratch_value = os.environ.get('BATCH_RENAME_SCRATCH') or os.environ.get('TMPDIR')
         if not scratch_value:
             raise RuntimeError('Set BATCH_RENAME_SCRATCH or TMPDIR to a writable scratch directory')
