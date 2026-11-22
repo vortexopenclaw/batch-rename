@@ -335,6 +335,10 @@ public enum Planner {
         cache[path] = folder
         return folder
     }
+    static let emptyFileProblem = "Empty files can't be renamed safely on this disk."
+    /// FAT/exFAT derive an empty file's inode from its directory entry, so it changes on
+    /// every rename and the engine cannot verify the move.
+    static func emptyFile(_ identity: Identity) -> Bool { identity.kind == UInt16(S_IFREG) && identity.size == 0 }
     static func fatProblem(_ name: String) -> String? {
         let forbidden: Set<Unicode.Scalar> = ["\"", "*", "/", ":", "<", ">", "?", "\\", "|"]
         if name.unicodeScalars.contains(where: { forbidden.contains($0) || $0.value < 0x20 || $0.value == 0x7F }) {
@@ -352,7 +356,8 @@ public enum Planner {
             if name.utf8.elementsEqual(e.name.utf8) { continue }
             let parent = URL(fileURLWithPath: e.path).deletingLastPathComponent().path
             let facts = folder(parent, &folders)
-            var problem = RenameOperation.nameProblem(name, original: e.name)
+            var problem = facts.fat && Self.emptyFile(e.identity) ? emptyFileProblem : nil
+            if problem == nil { problem = RenameOperation.nameProblem(name, original: e.name) }
             if problem == nil, name.hasPrefix("."), !e.name.hasPrefix(".") { problem = "Would hide this item (name would start with a period)" }
             if problem == nil, facts.fat { problem = fatProblem(name) }
             if problem == nil, name.utf16.count > facts.nameMax { problem = "Name is too long (\(name.utf16.count) of \(facts.nameMax) characters)." }
@@ -831,6 +836,11 @@ public final class Engine {
         }
         let storage = [journalURL.path, journalURL.path + ".lock", logURL.path].map(storageKey)
         for item in plan {
+            let parent = URL(fileURLWithPath: item.entry.path).deletingLastPathComponent()
+            if Planner.emptyFile(item.entry.identity),
+               try parent.resourceValues(forKeys: [.volumeSupportsExclusiveRenamingKey]).volumeSupportsExclusiveRenaming != true {
+                throw RenameError("\(Planner.emptyFileProblem) \(item.entry.path)")
+            }
             for path in [item.entry.path, item.destination] {
                 let key = storageKey(path)
                 guard !storage.contains(where: { $0 == key || $0.hasPrefix(key + "/") }) else {

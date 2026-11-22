@@ -151,6 +151,42 @@ final class EngineRegressionTests: ScratchTestCase {
     }
 }
 
+/// Review findings C1, C2, C5 (engine) against real volumes.
+final class EngineReviewFindingTests: ScratchTestCase {
+    // C1: FAT/exFAT re-derive an empty file's inode from its directory entry on every rename.
+    func testEmptyFilesOnFATFamilyAreRefusedWithoutMutation() throws {
+        for fs in ["ExFAT", "MS-DOS"] {
+            let volume = try diskImage(fs)
+            let empty = volume.appendingPathComponent("empty.txt").path
+            XCTAssertTrue(FileManager.default.createFile(atPath: empty, contents: Data()), fs)
+            let full = try file("full.txt", in: volume)
+            let entry = try Entry(empty)
+            for name in ["emptyX.txt", "EMPTY.txt"] {
+                let result = Planner.plan(proposals: [Proposal(entry: entry, name: name), Proposal(entry: try Entry(full), name: "fullX.txt")])
+                XCTAssertEqual(result.problems[empty], "Empty files can't be renamed safely on this disk.", fs)
+                XCTAssertEqual(result.items.map(\.entry.path), [full], fs)
+            }
+            let journal = root.appendingPathComponent("j-empty-\(fs)/undo.json")
+            var e: Engine? = try Engine(journalURL: journal)
+            for name in ["emptyX.txt", "EMPTY.txt"] {
+                // Caller-built plan: the whole call is rejected before any mutation.
+                let plan = [PlanItem(entry: try Entry(full), destination: volume.appendingPathComponent("fullX.txt").path),
+                            PlanItem(entry: entry, destination: volume.appendingPathComponent(name).path)]
+                XCTAssertThrowsError(try e!.apply(plan), fs)
+                let listing = try names(volume)
+                XCTAssertTrue(listing.contains("empty.txt") && listing.contains("full.txt"), "\(fs) \(listing)")
+                XCTAssertFalse(listing.contains { $0 == "emptyX.txt" || $0 == "EMPTY.txt" || $0 == "fullX.txt" || $0.hasPrefix(".batch-rename-") }, "\(fs) \(listing)")
+            }
+            XCTAssertFalse(e!.canUndo, fs)
+            e = nil
+            // No recovery classification was journaled.
+            e = try Engine(journalURL: journal)
+            XCTAssertFalse(e!.canUndo, fs)
+            e = nil
+        }
+    }
+}
+
 final class EngineProgressHistoryTests: ScratchTestCase {
     func testApplyOutcomeProgressAndCancellation() throws {
         let paths = try ["a", "b", "c"].map { try file($0 + ".mp4") }
