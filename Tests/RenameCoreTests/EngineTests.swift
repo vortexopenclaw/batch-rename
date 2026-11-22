@@ -185,6 +185,26 @@ final class EngineReviewFindingTests: ScratchTestCase {
             e = nil
         }
     }
+    // C2: a stranded case hop whose rollback keeps failing must stay in history.
+    func testPruningKeepsStrandedCaseHop() throws {
+        let a = try file("clip.txt"), entry = try Entry(a)
+        let temporary = root.appendingPathComponent(".batch-rename-" + UUID().uuidString).path
+        try FileManager.default.moveItem(atPath: a, toPath: temporary)
+        try file("clip.txt", contents: "occupant") // Rollback refuses to overwrite.
+        let stranded = UUID()
+        var steps = [Step(source: a, destination: temporary, identity: entry.identity, parent: entry.parent, batch: stranded, done: true)]
+        for b in 0..<Engine.maxBatches {
+            steps.append(Step(source: "/nonexistent/\(b)", destination: "/nonexistent/\(b)X", identity: entry.identity, parent: entry.parent, batch: UUID(), done: true))
+        }
+        try writeJournal(Journal(steps: steps))
+        var e: Engine? = try engine()
+        XCTAssertTrue(exists(temporary))
+        XCTAssertTrue(e!.steps.contains { $0.batch == stranded && $0.destination == temporary })
+        e = nil
+        let saved = try JSONDecoder().decode(Journal.self, from: Data(contentsOf: journalURL))
+        XCTAssertTrue(saved.steps.contains { $0.batch == stranded && $0.destination == temporary })
+        XCTAssertEqual(Set(saved.steps.map(\.batch)).count, Engine.maxBatches + 1)
+    }
 }
 
 final class EngineProgressHistoryTests: ScratchTestCase {

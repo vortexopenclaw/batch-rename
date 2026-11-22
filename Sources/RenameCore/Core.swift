@@ -661,7 +661,9 @@ public final class Engine {
             if live[step.batch] == nil { order.append(step.batch) }
             live[step.batch] = (live[step.batch] ?? false) || !step.undone
         }
-        let keep = Set(order.filter { live[$0]! }.suffix(Self.maxBatches))
+        // Never drop a batch whose case hop is still stranded at a temporary name.
+        let stranded = journal.steps.indices.filter(isStrandedHop).map { journal.steps[$0].batch }
+        let keep = Set(order.filter { live[$0]! }.suffix(Self.maxBatches)).union(stranded)
         guard keep.count < order.count else { return }
         journal.steps.removeAll { !keep.contains($0.batch) }
         rebuildPositions()
@@ -707,14 +709,17 @@ public final class Engine {
             else { throw ambiguous("rename") }
         }
         // A first case-change hop without its completed follow-up returns to the original name.
-        for i in journal.steps.indices where journal.steps[i].done && !journal.steps[i].undone && Self.isTemporary(journal.steps[i].destination) {
-            let s = journal.steps[i]
-            guard !journal.steps.contains(where: { $0.batch == s.batch && $0.source == s.destination && $0.done && !$0.undone }) else { continue }
+        for i in journal.steps.indices where isStrandedHop(i) {
             do { try undoStep(i) } catch {
                 // A non-mutating failure keeps the hop in history so Undo can retry it.
                 if journal.recoveryRequired != nil { throw error }
             }
         }
+    }
+    private func isStrandedHop(_ i: Int) -> Bool {
+        let s = journal.steps[i]
+        guard s.done && !s.undone && Self.isTemporary(s.destination) else { return false }
+        return !journal.steps.contains(where: { $0.batch == s.batch && $0.source == s.destination && $0.done && !$0.undone })
     }
     private func isPlaceholder(_ path: String, _ placeholder: Identity) -> Bool {
         guard let current = try? Identity.read(path), current == placeholder else { return false }
