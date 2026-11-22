@@ -67,7 +67,9 @@ public struct RenameOperation: Equatable {
     }
     private func tokenValue(_ token: String, _ context: TokenContext) -> String? {
         if (1...4).contains(token.count), token.allSatisfy({ $0 == "#" }) {
-            let n = sequenceStart + context.index - 1
+            let (offset, o1) = context.index.subtractingReportingOverflow(1)
+            let (n, o2) = sequenceStart.addingReportingOverflow(offset)
+            if o1 || o2 { return nil } // Out of range: leave the token literal.
             let digits = String(n.magnitude)
             return (n < 0 ? "-" : "") + String(repeating: "0", count: max(0, token.count - digits.count)) + digits
         }

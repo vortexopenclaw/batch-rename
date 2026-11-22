@@ -186,6 +186,15 @@ final class TokenTests: ScratchTestCase {
         XCTAssertTrue(try append.preview("clip, 02.mp4", context: TokenContext(index: 2, modified: nil)).skipped)
         XCTAssertFalse(try append.preview("clip, 02.mp4", context: TokenContext(index: 3, modified: nil)).skipped)
     }
+    // C4
+    func testSequenceOverflowLeavesTokenLiteral() throws {
+        var op = RenameOperation(); op.text = " {#}"; op.sequenceStart = Int.max
+        XCTAssertEqual(try op.name("clip.mp4", context: TokenContext(index: 1)), "clip \(Int.max).mp4")
+        XCTAssertEqual(try op.name("clip.mp4", context: TokenContext(index: 2)), "clip {#}.mp4")
+        op.sequenceStart = Int.min
+        XCTAssertEqual(try op.name("clip.mp4", context: TokenContext(index: 1)), "clip \(Int.min).mp4")
+        XCTAssertEqual(try op.name("clip.mp4", context: TokenContext(index: 0)), "clip {#}.mp4")
+    }
     func testEntryModifiedAndLegacyPlanIndicesFollowEntryOrder() throws {
         let a = try file("a.mp4"), b = try file("b.mp4"), c = try file("c.mp4")
         let date = Date(timeIntervalSince1970: 1_761_369_870)
