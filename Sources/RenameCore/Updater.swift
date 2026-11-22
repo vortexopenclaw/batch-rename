@@ -132,17 +132,26 @@ public enum UpdateTransactions {
         }
     }
     static func needsRecovery(_ directory: URL) -> Bool { FileManager.default.fileExists(atPath: directory.appendingPathComponent(recoveryMarker).path) }
-    /// After a healthy launch: keep only the newest acknowledged transaction, trimmed to its backup
-    /// and records. Unacknowledged, recovery-flagged, foreign, or unreadable transactions are never touched.
+    /// After a healthy launch: keep the acknowledged transaction with the highest manifest build, and
+    /// any whose manifest matches the app now at `original` (its backup is the only rollback), removing
+    /// their downloads and staging. Order never depends on file dates, which clock skew can corrupt.
+    /// Unacknowledged, recovery-flagged, foreign, or unreadable transactions are never touched.
     public static func cleanUpAfterHealthyLaunch(original: URL) {
-        let acknowledged = records(original: original).compactMap { directory, record -> (URL, Date)? in
+        let info = NSDictionary(contentsOf: original.appendingPathComponent("Contents/Info.plist"))
+        let runningVersion = info?["CFBundleShortVersionString"] as? String, runningBuild = info?["CFBundleVersion"] as? String
+        let acknowledged = records(original: original).compactMap { directory, record -> (URL, Record, Int)? in
             guard UpdateHealth.confirmed(at: directory, token: record.token), !needsRecovery(directory),
-                  let date = (try? FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent("healthy").path))?[.modificationDate] as? Date else { return nil }
-            return (directory, date)
-        }.sorted { $0.1 > $1.1 }
-        guard let newest = acknowledged.first?.0 else { return }
-        for remnant in ["release.zip", "install", "stage"] { try? FileManager.default.removeItem(at: newest.appendingPathComponent(remnant)) }
-        for (older, _) in acknowledged.dropFirst() { try? FileManager.default.removeItem(at: older) }
+                  let build = Int(record.manifest.build) else { return nil }
+            return (directory, record, build)
+        }.sorted { $0.2 > $1.2 }
+        for (index, (directory, record, _)) in acknowledged.enumerated() {
+            let running = UpdatePolicy.sameVersion(record.manifest.version, runningVersion) && record.manifest.build == runningBuild
+            if index == 0 || running {
+                for remnant in ["release.zip", "install", "stage"] { try? FileManager.default.removeItem(at: directory.appendingPathComponent(remnant)) }
+            } else {
+                try? FileManager.default.removeItem(at: directory)
+            }
+        }
     }
     /// Clears the recovery marker when the running app is the acknowledged result of that transaction
     /// (for example, the helper timed out before a slow but successful startup acknowledged).

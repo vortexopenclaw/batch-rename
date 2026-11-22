@@ -33,7 +33,7 @@ The `batch-rename-updates` Cloudflare Worker (`workers/batch-rename/github-updat
    ```
 
 3. Push the commit and a new tag pointing at it. Never move an existing tag.
-4. Dispatch `.github/workflows/batch-rename-release.yml` with that tag. It runs on GitHub-hosted `macos-15` Apple Silicon runners. The release job checks out `refs/tags/<tag>`, runs `release-metadata.py tag`, finds the highest other published (non-draft) release with `gh release list --exclude-drafts`, reads that release's `manifest.json` for the previous version and build, packages, signs with the repository secret, and runs `verify-release` against the previous release. It then creates a **draft** release. Its permissions are `contents: write` only, and checkout credentials are not persisted.
+4. Dispatch `.github/workflows/batch-rename-release.yml` with that tag. Its release job runs in the `batch-rename-release` GitHub environment, on GitHub-hosted `macos-15` Apple Silicon runners. The release job checks out `refs/tags/<tag>`, runs `release-metadata.py tag`, finds the highest other published (non-draft) release with `gh release list --exclude-drafts`, reads that release's `manifest.json` for the previous version and build, packages, signs with the repository secret, and runs `verify-release` against the previous release. It then creates a **draft** release. Its permissions are `contents: write` only, and checkout credentials are not persisted.
 5. Download the draft assets into ignored `release-assets/<version>/` and verify them locally against the bundled trust key:
 
    ```sh
@@ -46,7 +46,7 @@ The `batch-rename-updates` Cloudflare Worker (`workers/batch-rename/github-updat
 
    `verify-release` checks both signatures, the strict payload, a version and build strictly greater than the previous release, the archive checksum and name, then extracts the ZIP with the client's `UpdateArchive` and runs `UpdateInstaller.validateBundle` (bundle identity, minimum macOS, and `codesign`).
 6. Publish the verified draft and read the public assets back. Never replace archive bytes of a published release.
-7. Deploy the Worker with existing authorized Cloudflare access: `wrangler deploy --config workers/batch-rename/wrangler-github.json`. Read both live endpoints back with an app User-Agent, compare the manifest bytes and archive SHA-256 with the release, and verify the signatures.
+7. Never deploy the Worker with a new `RELEASE_TAG` before that GitHub release is published; until then the feed returns 503. Deploy the Worker with existing authorized Cloudflare access: `wrangler deploy --config workers/batch-rename/wrangler-github.json`. Read both live endpoints back with an app User-Agent, compare the manifest bytes and archive SHA-256 with the release, and verify the signatures.
 
 ## Rolling back
 
