@@ -21,13 +21,16 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ inputs.tag || github.sha }}
+          # Dispatch tests the tag itself; refs/tags/ avoids resolving a same-named branch.
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}
           persist-credentials: false
       - name: Prepare isolated Apple Silicon build
         run: |
           test "$(uname -m)" = arm64
           mkdir -p "$RUNNER_TEMP/batch-rename-scratch"
           printf 'BATCH_RENAME_SCRATCH=%s\n' "$RUNNER_TEMP/batch-rename-scratch" >> "$GITHUB_ENV"
+      - name: Release metadata consistency
+        run: python3 scripts/release-metadata.py readme
       - name: App and native preview tests
         run: bash scripts/test-direct.sh
       - name: Package and verify rename and undo
@@ -36,10 +39,9 @@ jobs:
           source scripts/env.sh
           "build/Batch Rename.app/Contents/MacOS/BatchRename" --verify
           codesign --verify --deep --strict 'build/Batch Rename.app'
-      - name: Update archive, publisher, and Worker tests
+      - name: Update archive, release tool, and Worker tests
         run: |
           bash scripts/test-update-bundle.sh
-          python3 scripts/test-publish-update.py
           python3 scripts/test-release-update.py
           node --test workers/batch-rename/*.test.mjs
   release:
@@ -58,7 +60,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ inputs.tag }}
+          ref: refs/tags/${{ inputs.tag }}
           persist-credentials: false
       - name: Prepare isolated release build
         run: |
@@ -67,15 +69,21 @@ jobs:
           printf 'BATCH_RENAME_SCRATCH=%s\n' "$RUNNER_TEMP/batch-rename-scratch" >> "$GITHUB_ENV"
       - name: Validate scope and public configuration
         run: |
-          python3 - <<'PY'
-          import os, plistlib, json, re
-          tag = os.environ['RELEASE_TAG']
-          assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+(?:-beta)?', tag)
-          info = plistlib.load(open('Resources/Info.plist', 'rb'))
-          assert tag.removesuffix('-beta') == 'v' + info['CFBundleShortVersionString']
-          assert info['CFBundleIdentifier'] == 'com.vortexopenclaw.batch-rename'
-          json.load(open('Resources/UpdateConfiguration.json'))
-          PY
+          # Tag, Info.plist, README title, and the Worker's pinned RELEASE_TAG must all agree.
+          python3 scripts/release-metadata.py tag "$RELEASE_TAG"
+          python3 -c 'import json; json.load(open("Resources/UpdateConfiguration.json"))'
+      - name: Identify previous published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Drafts are excluded; the tag being built is never its own baseline.
+          gh release list --exclude-drafts --limit 200 --json tagName --jq '.[].tagName' > "$RUNNER_TEMP/published-tags"
+          previous=$(python3 scripts/release-metadata.py previous-tag "$RELEASE_TAG" < "$RUNNER_TEMP/published-tags")
+          mkdir -p "$RUNNER_TEMP/previous-release"
+          gh release download "$previous" --pattern manifest.json --dir "$RUNNER_TEMP/previous-release"
+          python3 scripts/release-metadata.py previous-identity "$RUNNER_TEMP/previous-release/manifest.json" >> "$GITHUB_ENV"
+          echo "Previous published release: $previous"
       - name: Package ad-hoc signed app
         run: |
           bash scripts/package.sh --direct
@@ -90,8 +98,12 @@ jobs:
         run: |
           set +x
           printf '%s' "$RELEASE_SIGNING_KEY" | build/sign-update build/release/unsigned.json build/release/manifest.json
-      - name: Verify signed release
-        run: build/verify-release build/release/manifest.json build/release/*.zip
+      - name: Verify signed release with the client pipeline
+        run: |
+          source scripts/env.sh
+          archives=(build/release/*.zip)
+          test "${#archives[@]}" -eq 1
+          build/verify-release build/release/manifest.json "${archives[0]}" --previous-version "$PREVIOUS_VERSION" --previous-build "$PREVIOUS_BUILD"
       - name: Create draft GitHub release for review
         env:
           GH_TOKEN: ${{ github.token }}

@@ -11,6 +11,9 @@ import tempfile
 import unittest
 
 SCRIPT = pathlib.Path(__file__).with_name('release-update.py')
+METADATA = pathlib.Path(__file__).with_name('release-metadata.py')
+# Synthetic identity; deliberately not the current release so fixtures never go stale.
+VERSION, BUILD, TAG = '2.3.4', '17', 'v2.3.4-beta'
 
 
 class ReleaseMetadataTests(unittest.TestCase):
@@ -77,6 +80,62 @@ class ReleaseMetadataTests(unittest.TestCase):
         result, manifest, count = self.release('14.00')
         self.assertNotEqual(result.returncode, 0)
         self.assertIsNone(manifest)
+
+
+class ReleaseMetadataCheckTests(unittest.TestCase):
+    def checkout(self, version=VERSION, build=BUILD, readme=None, release_tag=TAG):
+        directory = tempfile.TemporaryDirectory(dir=pathlib.Path(os.environ['TMPDIR']).resolve())
+        self.addCleanup(directory.cleanup)
+        root = pathlib.Path(directory.name)
+        (root / 'Resources').mkdir()
+        (root / 'Resources/Info.plist').write_bytes(plistlib.dumps(dict(CFBundleIdentifier='com.vortexopenclaw.batch-rename', CFBundleShortVersionString=version, CFBundleVersion=build)))
+        (root / 'README.md').write_text((readme if readme is not None else f'# Batch Rename {version} (build {build})') + '\n\nText.\n')
+        (root / 'workers/batch-rename').mkdir(parents=True)
+        (root / 'workers/batch-rename/wrangler-github.json').write_text(json.dumps(dict(name='batch-rename-updates', vars=dict(RELEASE_TAG=release_tag))))
+        return root
+
+    def run_check(self, *args, stdin=''):
+        return subprocess.run([sys.executable, str(METADATA), *args], capture_output=True, text=True, input=stdin)
+
+    def test_readme_title_must_match_info_plist(self):
+        self.assertEqual(self.run_check('readme', '--root', str(self.checkout())).returncode, 0)
+        for readme in ['# Batch Rename 2.3.3 (build 17)', '# Batch Rename 2.3.4 (build 16)', '# Batch Rename 2.3.4', 'Batch Rename 2.3.4 (build 17)']:
+            with self.subTest(readme=readme):
+                result = self.run_check('readme', '--root', str(self.checkout(readme=readme)))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('README', result.stderr)
+
+    def test_tag_must_match_info_plist_readme_and_worker_release_tag(self):
+        result = self.run_check('tag', TAG, '--root', str(self.checkout()))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.run_check('tag', 'v2.3.4', '--root', str(self.checkout(release_tag='v2.3.4'))).returncode, 0)
+        cases = [('v2.3.5-beta', {}), ('v2.3.4-rc', {}), ('2.3.4', {}), ('v02.3.4-beta', {}),
+                 (TAG, dict(release_tag='v2.3.3-beta')), (TAG, dict(release_tag='v2.3.4')),
+                 (TAG, dict(readme='# Batch Rename 2.3.3 (build 17)'))]
+        for tag, options in cases:
+            with self.subTest(tag=tag, options=options):
+                self.assertNotEqual(self.run_check('tag', tag, '--root', str(self.checkout(**options))).returncode, 0)
+
+    def test_previous_tag_is_highest_other_published_release(self):
+        published = '\n'.join(['v0.1.1-beta', 'v0.1.3-beta', 'v0.1.10', 'v0.1.2', 'nightly', 'v01.9.9', TAG]) + '\n'
+        result = self.run_check('previous-tag', TAG, stdin=published)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'v0.1.10')
+        self.assertNotEqual(self.run_check('previous-tag', TAG, stdin=TAG + '\nnightly\n').returncode, 0)
+        self.assertNotEqual(self.run_check('previous-tag', 'v0.1.4-beta', stdin=published).returncode, 0, 'newer release already published')
+
+    def test_previous_identity_reads_published_manifest(self):
+        directory = tempfile.TemporaryDirectory(dir=pathlib.Path(os.environ['TMPDIR']).resolve())
+        self.addCleanup(directory.cleanup)
+        manifest = pathlib.Path(directory.name) / 'manifest.json'
+        manifest.write_text(json.dumps(dict(version='0.1.3', build='4', signature='legacy-only manifests are fine')))
+        result = self.run_check('previous-identity', str(manifest))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'PREVIOUS_VERSION=0.1.3\nPREVIOUS_BUILD=4\n')
+        for bad in [dict(version='0.1', build='4'), dict(version='0.1.3', build='04'), dict(version='0.1.3\nX=1', build='4'), dict(version='0.1.3')]:
+            with self.subTest(bad=bad):
+                manifest.write_text(json.dumps(bad))
+                self.assertNotEqual(self.run_check('previous-identity', str(manifest)).returncode, 0)
 
 
 if __name__ == '__main__':
