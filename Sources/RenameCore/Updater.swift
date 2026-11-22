@@ -113,6 +113,57 @@ public enum UpdateTransactions {
             throw error
         }
     }
+    /// Fields of the app's `plan.json` (written by this and earlier helpers) used for housekeeping.
+    struct Record: Decodable { let original: URL; let transaction: URL; let token: String; let manifest: UpdateManifest }
+    static let recoveryMarker = "NEEDS-RECOVERY.txt"
+    static func same(_ a: URL, _ b: URL) -> Bool { a.standardizedFileURL.path == b.standardizedFileURL.path }
+    /// Physical transactions beside `original` whose plan names this app and this directory.
+    static func records(original: URL) -> [(URL, Record)] {
+        let parent = original.deletingLastPathComponent()
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: parent.path) else { return [] }
+        return names.filter { $0.hasPrefix(prefix) }.compactMap { name in
+            let directory = parent.appendingPathComponent(name, isDirectory: true)
+            var metadata = stat()
+            guard lstat(directory.path, &metadata) == 0, metadata.st_mode & UInt16(S_IFMT) == UInt16(S_IFDIR), (try? UpdateInstaller.physical(directory)) != nil,
+                  let data = try? Data(contentsOf: directory.appendingPathComponent("plan.json")),
+                  let record = try? JSONDecoder().decode(Record.self, from: data),
+                  same(record.original, original), same(record.transaction, directory) else { return nil }
+            return (directory, record)
+        }
+    }
+    static func needsRecovery(_ directory: URL) -> Bool { FileManager.default.fileExists(atPath: directory.appendingPathComponent(recoveryMarker).path) }
+    /// After a healthy launch: keep only the newest acknowledged transaction, trimmed to its backup
+    /// and records. Unacknowledged, recovery-flagged, foreign, or unreadable transactions are never touched.
+    public static func cleanUpAfterHealthyLaunch(original: URL) {
+        let acknowledged = records(original: original).compactMap { directory, record -> (URL, Date)? in
+            guard UpdateHealth.confirmed(at: directory, token: record.token), !needsRecovery(directory),
+                  let date = (try? FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent("healthy").path))?[.modificationDate] as? Date else { return nil }
+            return (directory, date)
+        }.sorted { $0.1 > $1.1 }
+        guard let newest = acknowledged.first?.0 else { return }
+        for remnant in ["release.zip", "install", "stage"] { try? FileManager.default.removeItem(at: newest.appendingPathComponent(remnant)) }
+        for (older, _) in acknowledged.dropFirst() { try? FileManager.default.removeItem(at: older) }
+    }
+    /// Clears the recovery marker when the running app is the acknowledged result of that transaction
+    /// (for example, the helper timed out before a slow but successful startup acknowledged).
+    public static func clearResolvedRecovery(original: URL, runningVersion: String?, runningBuild: String?) {
+        for (directory, record) in records(original: original) where needsRecovery(directory) {
+            guard UpdateHealth.confirmed(at: directory, token: record.token),
+                  UpdatePolicy.sameVersion(record.manifest.version, runningVersion), record.manifest.build == runningBuild else { continue }
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(recoveryMarker))
+        }
+    }
+    public static func recoveryNotices(original: URL) -> [(transaction: URL, notice: String)] {
+        records(original: original).compactMap { directory, _ in
+            guard let notice = try? String(contentsOf: directory.appendingPathComponent(recoveryMarker), encoding: .utf8) else { return nil }
+            return (directory, notice)
+        }
+    }
+    /// Removes only the notice. Backups and every other recovery file stay in place.
+    public static func dismissRecovery(_ transaction: URL, original: URL) throws {
+        guard records(original: original).contains(where: { same($0.0, transaction) }) else { throw RenameError("Not an update transaction for this app") }
+        try FileManager.default.removeItem(at: transaction.appendingPathComponent(recoveryMarker))
+    }
     /// Removes a transaction that no helper has been given.
     public static func discard(_ transaction: URL) {
         guard transaction.lastPathComponent.hasPrefix(prefix), (try? UpdateInstaller.physical(transaction)) != nil else { return }
@@ -194,7 +245,8 @@ public enum UpdateInstaller {
     public static func physical(_ url: URL) throws {
         guard url.path == url.resolvingSymlinksInPath().standardizedFileURL.path else { throw RenameError("Update paths must not contain symbolic links") }
     }
-    /// Backup is never deleted automatically, including after acknowledgment.
+    /// Never deletes the backup. Only `UpdateTransactions.cleanUpAfterHealthyLaunch` prunes
+    /// backups, and only for older acknowledged transactions.
     public static func replace(original: URL, staged: URL, backup: URL, launch: () throws -> Void) throws {
         for url in [original, staged, backup] { try physical(url) }
         guard !FileManager.default.fileExists(atPath: backup.path) else { throw RenameError("Backup already exists") }

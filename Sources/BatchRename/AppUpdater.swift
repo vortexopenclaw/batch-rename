@@ -4,7 +4,9 @@ import Darwin
 import CryptoKit
 import RenameCore
 
-private struct InstallPlan: Codable {
+/// Persisted helper input. Field names and types are shared with installed 0.1.x helpers and
+/// with `UpdateTransactions` housekeeping; do not rename them.
+struct InstallPlan: Codable {
     let original: URL
     let transaction: URL
     let manifest: UpdateManifest
@@ -243,31 +245,42 @@ private struct InstallPlan: Codable {
         }
     }
     private static var showedRecovery = false
+    /// Shown on each launch until dismissed. Dismiss removes only the marker; backups stay.
     static func showRecoveryNotice() {
         guard !showedRecovery else { return }; showedRecovery = true
         let original = Bundle.main.bundleURL
-        guard let directories = try? FileManager.default.contentsOfDirectory(at: original.deletingLastPathComponent(), includingPropertiesForKeys: nil) else { return }
-        for directory in directories where directory.lastPathComponent.hasPrefix(".batch-rename-update-") {
-            guard let plan = validatedPlan(directory.appendingPathComponent("plan.json").path),
-                  let notice = try? String(contentsOf: plan.transaction.appendingPathComponent("NEEDS-RECOVERY.txt"), encoding: .utf8) else { continue }
-            AppDelegate.model?.message = "Update recovery needed. " + notice
-            if fixtureJournal == nil {
-                let alert = NSAlert(); alert.messageText = "Previous update needs attention"; alert.informativeText = notice
-                alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "Show Recovery Files")
-                if alert.runModal() == .alertSecondButtonReturn { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: directory.path) }
+        for (transaction, notice) in UpdateTransactions.recoveryNotices(original: original) {
+            if fixtureJournal != nil { AppDelegate.model?.message = "Update recovery needed. " + notice; continue }
+            let alert = NSAlert(); alert.messageText = "Previous update needs attention"
+            alert.informativeText = notice + "\n\nDismiss removes only this notice. Backups and recovery files stay in \(transaction.path)."
+            alert.addButton(withTitle: "Show in Finder"); alert.addButton(withTitle: "Dismiss")
+            if alert.runModal() == .alertSecondButtonReturn {
+                do { try UpdateTransactions.dismissRecovery(transaction, original: original) }
+                catch { AppDelegate.model?.message = "Update recovery notice could not be dismissed: \(error.localizedDescription)" }
+            } else {
+                AppDelegate.model?.message = "Update recovery needed. " + notice
+                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: transaction.path)
             }
         }
     }
+    private static var cleanedUp = false
     static func acknowledge() {
+        guard AppDelegate.model?.startupHealthy == true else { return }
         let args = CommandLine.arguments
-        guard args.count == 4, args[1] == "--update-health", AppDelegate.model?.startupHealthy == true else { return }
-        do {
-            let plan = try JSONDecoder().decode(InstallPlan.self, from: Data(contentsOf: URL(fileURLWithPath: args[2])))
-            guard plan.original == Bundle.main.bundleURL, plan.token == args[3], UpdatePolicy.sameVersion(plan.manifest.version, Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String),
-                  plan.transaction.deletingLastPathComponent() == plan.original.deletingLastPathComponent() else { return }
-            try UpdateInstaller.physical(plan.transaction)
-            try UpdateInstaller.validateBundle(plan.original, manifest: plan.manifest)
-            try UpdateHealth.acknowledge(at: plan.transaction, token: args[3], expectedToken: plan.token, healthy: true)
-        } catch { /* No acknowledgment means the backup remains available for recovery. */ }
+        if args.count == 4, args[1] == "--update-health" {
+            do {
+                let plan = try JSONDecoder().decode(InstallPlan.self, from: Data(contentsOf: URL(fileURLWithPath: args[2])))
+                guard plan.original == Bundle.main.bundleURL, plan.token == args[3], UpdatePolicy.sameVersion(plan.manifest.version, Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String),
+                      plan.transaction.deletingLastPathComponent() == plan.original.deletingLastPathComponent() else { throw RenameError("Install plan does not describe this app") }
+                try UpdateInstaller.physical(plan.transaction)
+                try UpdateInstaller.validateBundle(plan.original, manifest: plan.manifest)
+                try UpdateHealth.acknowledge(at: plan.transaction, token: args[3], expectedToken: plan.token, healthy: true)
+            } catch { /* No acknowledgment means the backup remains available for recovery. */ }
+        }
+        // Housekeeping runs once per healthy launch, after any acknowledgment above.
+        guard !cleanedUp else { return }; cleanedUp = true
+        let original = Bundle.main.bundleURL, info = Bundle.main.infoDictionary
+        UpdateTransactions.clearResolvedRecovery(original: original, runningVersion: info?["CFBundleShortVersionString"] as? String, runningBuild: info?["CFBundleVersion"] as? String)
+        UpdateTransactions.cleanUpAfterHealthyLaunch(original: original)
     }
 }

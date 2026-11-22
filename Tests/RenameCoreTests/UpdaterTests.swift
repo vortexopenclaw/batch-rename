@@ -89,6 +89,69 @@ final class UpdaterTests: XCTestCase {
     func updateTransactions(in directory: URL) throws -> [String] {
         try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.hasPrefix(".batch-rename-update-") }
     }
+    /// A transaction as the helper leaves it, encoded with the app's real InstallPlan type.
+    func makeTransaction(in install: URL, original: URL, version: String = UpdateFixture.releaseVersion, build: String = UpdateFixture.releaseBuild, acknowledged: Bool = true, recovery: Bool = false, healthyToken: String? = nil, age: TimeInterval = 0) throws -> URL {
+        let transaction = install.appendingPathComponent(".batch-rename-update-" + UUID().uuidString), token = UUID().uuidString
+        try FileManager.default.createDirectory(at: transaction.appendingPathComponent("previous.app/Contents"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: transaction.appendingPathComponent("install"), withIntermediateDirectories: true)
+        try Data("previous".utf8).write(to: transaction.appendingPathComponent("previous.app/Contents/marker"))
+        try Data("zip".utf8).write(to: transaction.appendingPathComponent("release.zip"))
+        let plan = InstallPlan(original: original, transaction: transaction, manifest: UpdateFixture.manifest(version: version, build: build), parent: 42, token: token, parentLaunch: Date())
+        try JSONEncoder().encode(plan).write(to: transaction.appendingPathComponent("plan.json"))
+        if acknowledged {
+            let healthy = transaction.appendingPathComponent("healthy")
+            try Data((healthyToken ?? token).utf8).write(to: healthy)
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-age)], ofItemAtPath: healthy.path)
+        }
+        if recovery { try Data("Startup was not acknowledged.".utf8).write(to: transaction.appendingPathComponent("NEEDS-RECOVERY.txt")) }
+        return transaction
+    }
+    func contents(_ url: URL) -> Set<String> { Set((try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []) }
+    func testHealthyLaunchKeepsOnlyNewestAcknowledgedBackup() throws {
+        let root = try root(), install = root.appendingPathComponent("Applications"), original = install.appendingPathComponent("Batch Rename.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: original, withIntermediateDirectories: true)
+        let older = try makeTransaction(in: install, original: original, version: "1.3.0", build: "13", age: 3600)
+        let newest = try makeTransaction(in: install, original: original, age: 10)
+        let pending = try makeTransaction(in: install, original: original, acknowledged: false)
+        let recovery = try makeTransaction(in: install, original: original, version: "1.2.0", build: "12", recovery: true, age: 7200)
+        let otherApp = try makeTransaction(in: install, original: install.appendingPathComponent("Other.app"), age: 7200)
+        let wrongToken = try makeTransaction(in: install, original: original, healthyToken: UUID().uuidString, age: 7200)
+        let orphan = install.appendingPathComponent(".batch-rename-update-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: false)
+        try Data("zip".utf8).write(to: orphan.appendingPathComponent("release.zip"))
+        UpdateTransactions.cleanUpAfterHealthyLaunch(original: original)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: older.path), "older acknowledged transaction pruned")
+        XCTAssertEqual(contents(newest), ["previous.app", "plan.json", "healthy"], "newest keeps only its backup and records")
+        XCTAssertEqual(try String(contentsOf: newest.appendingPathComponent("previous.app/Contents/marker"), encoding: .utf8), "previous")
+        for kept in [pending, recovery, otherApp, wrongToken] {
+            XCTAssertTrue(contents(kept).isSuperset(of: ["previous.app", "release.zip", "install", "plan.json"]), kept.lastPathComponent)
+        }
+        XCTAssertEqual(contents(orphan), ["release.zip"], "unknown state is never deleted")
+        // Idempotent on the next healthy launch.
+        UpdateTransactions.cleanUpAfterHealthyLaunch(original: original)
+        XCTAssertEqual(contents(newest), ["previous.app", "plan.json", "healthy"])
+    }
+    func testRecoveryNoticeDismissesOnlyMarkerAndClearsForHealthyResult() throws {
+        let root = try root(), install = root.appendingPathComponent("Applications"), original = install.appendingPathComponent("Batch Rename.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: original, withIntermediateDirectories: true)
+        // Helper timed out, then this running app acknowledged late: it is the healthy result.
+        let resolved = try makeTransaction(in: install, original: original, recovery: true)
+        let unresolved = try makeTransaction(in: install, original: original, acknowledged: false, recovery: true)
+        let otherVersion = try makeTransaction(in: install, original: original, version: "1.6.0", build: "16", recovery: true)
+        XCTAssertEqual(Set(UpdateTransactions.recoveryNotices(original: original).map(\.transaction.lastPathComponent)), [resolved, unresolved, otherVersion].reduce(into: Set<String>()) { $0.insert($1.lastPathComponent) })
+        UpdateTransactions.clearResolvedRecovery(original: original, runningVersion: UpdateFixture.releaseVersion, runningBuild: UpdateFixture.releaseBuild)
+        XCTAssertFalse(contents(resolved).contains("NEEDS-RECOVERY.txt"))
+        XCTAssertTrue(contents(resolved).contains("previous.app"))
+        XCTAssertTrue(contents(unresolved).contains("NEEDS-RECOVERY.txt"))
+        XCTAssertTrue(contents(otherVersion).contains("NEEDS-RECOVERY.txt"))
+        let notices = UpdateTransactions.recoveryNotices(original: original)
+        XCTAssertEqual(Set(notices.map(\.transaction.lastPathComponent)), [unresolved.lastPathComponent, otherVersion.lastPathComponent])
+        XCTAssertEqual(notices.first?.notice, "Startup was not acknowledged.")
+        try UpdateTransactions.dismissRecovery(unresolved, original: original)
+        XCTAssertEqual(contents(unresolved), ["previous.app", "release.zip", "install", "plan.json"], "Dismiss removes only the marker")
+        XCTAssertEqual(UpdateTransactions.recoveryNotices(original: original).map(\.transaction.lastPathComponent), [otherVersion.lastPathComponent])
+        XCTAssertThrowsError(try UpdateTransactions.dismissRecovery(root, original: original), "only update transactions")
+    }
     func testStreamingDownloadIsOwnerOnlyHashedAndBounded() async throws {
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [DownloadFixture.self]
         let fetcher = UpdateFetcher(userAgent: fixtureUserAgent), root = try root()
