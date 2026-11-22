@@ -131,6 +131,27 @@ final class UpdaterTests: XCTestCase {
         UpdateTransactions.cleanUpAfterHealthyLaunch(original: original)
         XCTAssertEqual(contents(newest), ["previous.app", "plan.json", "healthy"])
     }
+    /// Clock skew must not choose the kept transaction: order by build, and never delete the
+    /// transaction that produced the running app (its previous.app is the only rollback).
+    func testHealthyLaunchIgnoresSkewedHealthyDatesAndKeepsRunningTransaction() throws {
+        let root = try root(), install = root.appendingPathComponent("Applications"), original = install.appendingPathComponent("Batch Rename.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: original.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        let running = ["CFBundleShortVersionString": UpdateFixture.releaseVersion, "CFBundleVersion": UpdateFixture.releaseBuild]
+        try PropertyListSerialization.data(fromPropertyList: running, format: .xml, options: 0).write(to: original.appendingPathComponent("Contents/Info.plist"))
+        let current = try makeTransaction(in: install, original: original)
+        let skewed = try makeTransaction(in: install, original: original, version: "1.3.0", build: "13", age: -86_400)
+        UpdateTransactions.cleanUpAfterHealthyLaunch(original: original)
+        XCTAssertEqual(contents(current), ["previous.app", "plan.json", "healthy"], "running transaction kept despite the newer healthy date")
+        XCTAssertEqual(try String(contentsOf: current.appendingPathComponent("previous.app/Contents/marker"), encoding: .utf8), "previous")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: skewed.path), "lower build pruned")
+        // Build order is numeric, and the running transaction survives even when a higher build exists.
+        let higher = try makeTransaction(in: install, original: original, version: "1.10.0", build: "100", age: 3600)
+        let lower = try makeTransaction(in: install, original: original, version: "1.9.0", build: "99", age: -86_400)
+        UpdateTransactions.cleanUpAfterHealthyLaunch(original: original)
+        XCTAssertEqual(contents(current), ["previous.app", "plan.json", "healthy"])
+        XCTAssertEqual(contents(higher), ["previous.app", "plan.json", "healthy"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: lower.path))
+    }
     func testRecoveryNoticeDismissesOnlyMarkerAndClearsForHealthyResult() throws {
         let root = try root(), install = root.appendingPathComponent("Applications"), original = install.appendingPathComponent("Batch Rename.app", isDirectory: true)
         try FileManager.default.createDirectory(at: original, withIntermediateDirectories: true)
