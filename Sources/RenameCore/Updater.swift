@@ -19,6 +19,15 @@ public struct UpdateConfiguration: Codable {
 
 /// Redirects are rejected: only the two explicitly configured HTTPS endpoints are contacted.
 public final class UpdateFetcher: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    public let userAgent: String
+    public init(userAgent: String) { self.userAgent = userAgent }
+    public convenience init(bundle: Bundle = .main) { self.init(userAgent: Self.userAgent(info: bundle.infoDictionary)) }
+    /// Identifies the running bundle; malformed metadata is reported as `unknown`, never copied into the header.
+    public static func userAgent(info: [String: Any]?) -> String {
+        let version = (info?["CFBundleShortVersionString"] as? String).flatMap { UpdatePolicy.version($0) != nil ? $0 : nil } ?? "unknown"
+        let build = (info?["CFBundleVersion"] as? String).flatMap { !$0.isEmpty && $0.utf8.allSatisfy({ (48...57).contains($0) }) ? $0 : nil } ?? "unknown"
+        return "BatchRename/\(version) (\(build)) CFNetwork/Darwin"
+    }
     public func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
     public func fetch(_ url: URL, limit: Int, configuration: URLSessionConfiguration = .ephemeral) async throws -> Data {
         guard url.scheme == "https" else { throw RenameError("HTTPS is required") }
@@ -26,7 +35,7 @@ public final class UpdateFetcher: NSObject, URLSessionTaskDelegate, @unchecked S
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         defer { session.invalidateAndCancel() }
         var request = URLRequest(url: url)
-        request.setValue("BatchRename/0.1.1 CFNetwork/Darwin", forHTTPHeaderField: "User-Agent")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("application/json, application/zip, application/octet-stream", forHTTPHeaderField: "Accept")
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200, response.expectedContentLength <= limit else { throw RenameError("Update download rejected") }

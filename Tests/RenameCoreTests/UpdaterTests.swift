@@ -2,11 +2,12 @@ import XCTest
 import CryptoKit
 @testable import RenameCore
 
+let fixtureUserAgent = "BatchRename/9.8.7 (65) CFNetwork/Darwin"
 final class DownloadFixture: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
-        XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "BatchRename/0.1.1 CFNetwork/Darwin")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), fixtureUserAgent)
         XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json, application/zip, application/octet-stream")
         if request.url!.path == "/fail" { client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost)); return }
         let status = request.url!.path == "/404" ? 404 : 200
@@ -113,9 +114,21 @@ final class UpdaterTests: XCTestCase {
     func testDownloadFailuresAndBounds() async throws {
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [DownloadFixture.self]
         for path in ["fail", "404", "too-large"] {
-            do { _ = try await UpdateFetcher().fetch(URL(string: "https://example.invalid/" + path)!, limit: path == "too-large" ? 3 : 100, configuration: configuration); XCTFail("Accepted \(path)") } catch {}
+            do { _ = try await UpdateFetcher(userAgent: fixtureUserAgent).fetch(URL(string: "https://example.invalid/" + path)!, limit: path == "too-large" ? 3 : 100, configuration: configuration); XCTFail("Accepted \(path)") } catch {}
         }
-        let data = try await UpdateFetcher().fetch(URL(string: "https://example.invalid/good")!, limit: 100, configuration: configuration)
+        let data = try await UpdateFetcher(userAgent: fixtureUserAgent).fetch(URL(string: "https://example.invalid/good")!, limit: 100, configuration: configuration)
         XCTAssertEqual(data, Data("fixture".utf8))
+    }
+    func testUserAgentComesFromRunningBundle() throws {
+        XCTAssertEqual(UpdateFetcher.userAgent(info: ["CFBundleShortVersionString": "9.8.7", "CFBundleVersion": "65"]), fixtureUserAgent)
+        XCTAssertEqual(UpdateFetcher.userAgent(info: ["CFBundleShortVersionString": "0.1.4", "CFBundleVersion": "5"]), "BatchRename/0.1.4 (5) CFNetwork/Darwin")
+        // Missing or malformed metadata never leaks arbitrary text into the header.
+        XCTAssertEqual(UpdateFetcher.userAgent(info: nil), "BatchRename/unknown (unknown) CFNetwork/Darwin")
+        XCTAssertEqual(UpdateFetcher.userAgent(info: ["CFBundleShortVersionString": "1.0.0\r\nX: y", "CFBundleVersion": "5 6"]), "BatchRename/unknown (unknown) CFNetwork/Darwin")
+        let app = try root().appendingPathComponent("Agent.app")
+        try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        let info: [String: Any] = ["CFBundleIdentifier": "test.agent", "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "9.8.7", "CFBundleVersion": "65"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: app.appendingPathComponent("Contents/Info.plist"))
+        XCTAssertEqual(UpdateFetcher(bundle: try XCTUnwrap(Bundle(url: app))).userAgent, fixtureUserAgent)
     }
 }
