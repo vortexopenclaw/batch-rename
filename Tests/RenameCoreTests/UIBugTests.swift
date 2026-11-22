@@ -286,5 +286,20 @@ final class UIBugTests: ScratchTestCase {
         XCTAssertEqual(UndoRouting.undo(editingText: false, sheetOpen: true, batchAvailable: true, locked: false), .text)
         XCTAssertEqual(UndoRouting.undo(editingText: false, sheetOpen: false, batchAvailable: true, locked: false), .batch)
     }
+
+    // Start at is clamped in the field and when presets are applied.
+    @MainActor func testSequenceStartIsClamped() async throws {
+        XCTAssertEqual(Preset.clampedStart(-5), 0)
+        XCTAssertEqual(Preset.clampedStart(42), 42)
+        XCTAssertEqual(Preset.clampedStart(5_000_000), 999_999)
+        var preset = Preset(name: "Big", operation: operation(" {#}"))
+        preset.sequenceStart = 5_000_000
+        let model = makeModel(journalURL)
+        model.applyPreset(preset)
+        XCTAssertEqual(model.operation.sequenceStart, 999_999)
+        preset.sequenceStart = -3
+        model.applyPreset(preset)
+        XCTAssertEqual(model.operation.sequenceStart, 0)
+    }
 }
 #endif

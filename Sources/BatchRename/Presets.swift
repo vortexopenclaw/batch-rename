@@ -14,6 +14,8 @@ struct Preset: Codable, Equatable, Identifiable {
     var skipExistingSuffix: Bool
     var sequenceStart: Int
     var id: String { name }
+    static let sequenceRange = 0...999_999
+    static func clampedStart(_ value: Int) -> Int { min(max(value, sequenceRange.lowerBound), sequenceRange.upperBound) }
     init(name: String, operation: RenameOperation) {
         self.name = name
         action = operation.action; scope = operation.scope; text = operation.text; search = operation.search
@@ -24,7 +26,7 @@ struct Preset: Codable, Equatable, Identifiable {
         var op = RenameOperation()
         op.action = action; op.scope = scope; op.text = text; op.search = search
         op.ignoreCase = ignoreCase; op.occurrences = Occurrences(rawValue: occurrences) ?? .all
-        op.skipExistingSuffix = skipExistingSuffix; op.sequenceStart = sequenceStart
+        op.skipExistingSuffix = skipExistingSuffix; op.sequenceStart = Self.clampedStart(sequenceStart)
         return op
     }
 }
