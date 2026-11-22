@@ -33,7 +33,7 @@ final class UpdaterTests: XCTestCase {
     func testBundleRejectsMissingMalformedOrMismatchedMinimumBeforeCodesign() throws {
         let app = try root().appendingPathComponent("Candidate.app")
         try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents"), withIntermediateDirectories: true)
-        let manifest = UpdateManifest(bundleIdentifier: "com.vortexopenclaw.batch-rename", version: "0.2.0", build: "2", assetKey: "batch-rename/releases/test.zip", downloadURL: URL(string: "https://example.invalid/download")!, sha256: String(repeating: "0", count: 64), minimumMacOS: "14.0.0")
+        let manifest = UpdateFixture.manifest()
         for minimum: Any? in [nil, "", "14", "14.", "14..0", "14.0.0.1", "14.0-beta", " 14.0", "14.0\n", "１４.０", 14, true, "15.0"] {
             var info: [String: Any] = ["CFBundleIdentifier": manifest.bundleIdentifier, "CFBundleShortVersionString": manifest.version, "CFBundleVersion": manifest.build, "CFBundleExecutable": "BatchRename"]
             info["LSMinimumSystemVersion"] = minimum
@@ -224,20 +224,22 @@ final class UpdaterTests: XCTestCase {
         XCTAssertThrowsError(try UpdateArchive.extract(zip(), to: destination))
     }
     func testAllSignedFieldsAndVersionGates() throws {
-        let key = Curve25519.Signing.PrivateKey(), url = URL(string: "https://example.invalid/batch-rename/download")!
-        let trust = UpdateTrust(publicKey: key.publicKey.rawRepresentation, downloadURL: url)
-        let m = try UpdateManifest(bundleIdentifier: "com.vortexopenclaw.batch-rename", version: "0.2.0", build: "2", assetKey: "batch-rename/releases/test.zip", downloadURL: url, sha256: SHA256.hash(data: zip()).map { String(format: "%02x", $0) }.joined(), minimumMacOS: "14.0.0").signed(with: key)
+        let key = Curve25519.Signing.PrivateKey()
+        let trust = UpdateTrust(publicKey: key.publicKey.rawRepresentation, downloadURL: UpdateFixture.downloadURL)
+        let m = try UpdateFixture.manifest(sha256: sha256Hex(zip())).signed(with: key)
+        let installed = UpdateFixture.installedVersion, release = UpdateFixture.releaseVersion, os = UpdateFixture.osVersion
         // Envelope tampering is covered field by field in UpdateTests.
         let fields = ["bundleIdentifier", "version", "build", "assetKey", "downloadURL", "sha256", "minimumMacOS"]
         for field in fields {
             var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(m)) as! [String: Any]
             object[field] = field == "downloadURL" ? "https://example.invalid/evil" : "tampered"
             let bad = try JSONDecoder().decode(UpdateManifest.self, from: JSONSerialization.data(withJSONObject: object))
-            XCTAssertThrowsError(try UpdatePolicy.validate(bad, trust: trust, currentVersion: "0.1.0", osVersion: "14.0.0"), field)
+            XCTAssertThrowsError(try UpdatePolicy.validate(bad, trust: trust, currentVersion: installed, osVersion: os), field)
         }
-        try UpdatePolicy.validate(m, trust: trust, currentVersion: "0.2.0", osVersion: "14.0.0", allowCurrent: true)
-        for current in ["0.2.0", "1.0.0", "invalid"] { XCTAssertThrowsError(try UpdatePolicy.validate(m, trust: trust, currentVersion: current, osVersion: "14.0.0")) }
-        XCTAssertThrowsError(try UpdatePolicy.validate(m, trust: trust, currentVersion: "0.1.0", osVersion: "13.9.0"))
+        try UpdatePolicy.validate(m, trust: trust, currentVersion: installed, osVersion: os)
+        try UpdatePolicy.validate(m, trust: trust, currentVersion: release, osVersion: os, allowCurrent: true)
+        for current in [release, "99.0.0", "invalid"] { XCTAssertThrowsError(try UpdatePolicy.validate(m, trust: trust, currentVersion: current, osVersion: os)) }
+        XCTAssertThrowsError(try UpdatePolicy.validate(m, trust: trust, currentVersion: installed, osVersion: "13.9.0"))
         var tampered = zip(); tampered[35] ^= 1
         XCTAssertThrowsError(try UpdatePolicy.validateArchive(tampered, manifest: m))
     }
