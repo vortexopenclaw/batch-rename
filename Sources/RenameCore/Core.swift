@@ -326,7 +326,7 @@ public struct PlanResult: Sendable {
     public init(items: [PlanItem], problems: [String: String]) { self.items = items; self.problems = problems }
 }
 public enum Planner {
-    private struct Folder { let nameMax: Int; let fat: Bool; var names: Set<[UInt8]>? }
+    private struct Folder { let nameMax: Int; let fat: Bool; let exclusive: Bool; var names: Set<[UInt8]>? }
     private static func folder(_ path: String, _ cache: inout [String: Folder]) -> Folder {
         if let cached = cache[path] { return cached }
         let max = pathconf(path, _PC_NAME_MAX)
@@ -334,7 +334,9 @@ public enum Planner {
         if statfs(path, &fs) == 0 {
             type = withUnsafePointer(to: &fs.f_fstypename) { $0.withMemoryRebound(to: CChar.self, capacity: Int(MFSTYPENAMELEN)) { String(cString: $0) } }
         }
-        let folder = Folder(nameMax: max > 0 ? max : 255, fat: type == "msdos" || type == "exfat", names: nil)
+        // Same capability test as Engine.apply's preflight, so planning and execution agree.
+        let exclusive = (try? URL(fileURLWithPath: path).resourceValues(forKeys: [.volumeSupportsExclusiveRenamingKey]).volumeSupportsExclusiveRenaming) == true
+        let folder = Folder(nameMax: max > 0 ? max : 255, fat: type == "msdos" || type == "exfat", exclusive: exclusive, names: nil)
         cache[path] = folder
         return folder
     }
@@ -359,7 +361,7 @@ public enum Planner {
             if name.utf8.elementsEqual(e.name.utf8) { continue }
             let parent = URL(fileURLWithPath: e.path).deletingLastPathComponent().path
             let facts = folder(parent, &folders)
-            var problem = facts.fat && Self.emptyFile(e.identity) ? emptyFileProblem : nil
+            var problem = !facts.exclusive && Self.emptyFile(e.identity) ? emptyFileProblem : nil
             if problem == nil { problem = RenameOperation.nameProblem(name, original: e.name) }
             if problem == nil, name.hasPrefix("."), !e.name.hasPrefix(".") { problem = "Would hide this item (name would start with a period)" }
             if problem == nil, facts.fat { problem = fatProblem(name) }
