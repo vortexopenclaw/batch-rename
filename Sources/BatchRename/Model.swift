@@ -131,6 +131,8 @@ struct Row: Identifiable {
     private var outcome: String?
     /// Short notes (drops, companion edits) shown before the ready summary.
     private var notes: [String] = []
+    /// Notes from drops during a rename or undo, shown after its outcome.
+    private var queuedNotes: [String] = []
     /// Summary of the last scan's skipped items, replaced by every scan.
     private var scanNotes: [String] = []
 
@@ -217,7 +219,7 @@ struct Row: Identifiable {
 
     func add(_ urls: [URL]) { add(urls, notes: []) }
     private func add(_ urls: [URL], notes: [String]) {
-        outcome = nil; self.notes = notes
+        if state == .applying || state == .undoing { queuedNotes += notes } else { outcome = nil; self.notes = notes }
         pendingURLs.append(contentsOf: urls)
         rebuild()
     }
@@ -230,7 +232,9 @@ struct Row: Identifiable {
         let skipped = items.count - valid.count
         let dropNotes = skipped > 0 ? [ModelText.droppedSkipped(skipped)] : []
         guard !valid.isEmpty else {
-            if skipped > 0 { outcome = nil; notes = dropNotes; message = dropNotes.joined(separator: " ") }
+            guard skipped > 0 else { return }
+            if state == .applying || state == .undoing { queuedNotes += dropNotes; return }
+            outcome = nil; notes = dropNotes; message = dropNotes.joined(separator: " ")
             return
         }
         add(valid, notes: dropNotes)
@@ -622,7 +626,7 @@ struct Row: Identifiable {
         refreshHistory()
         let renamed = files + folders
         let canUndo = undoAvailable && renamed > 0
-        notes = []
+        notes = queuedNotes; queuedNotes = []
         switch result {
         case .success(let outcome) where outcome.cancelled:
             self.outcome = ModelText.cancelled(renamed: outcome.renamed, total: outcome.total, undo: canUndo)
@@ -665,7 +669,7 @@ struct Row: Identifiable {
         refreshFrozen()
         state = .idle
         refreshHistory()
-        notes = []
+        notes = queuedNotes; queuedNotes = []
         switch result {
         case .success(let outcome): self.outcome = ModelText.restored(outcome.renamed)
         case .failure(let error):

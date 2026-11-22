@@ -241,5 +241,22 @@ final class UIBugTests: ScratchTestCase {
         model.endInstallation(); try await waitForIdle(model)
         XCTAssertEqual(model.rows.first { $0.id == id }?.proposed, "aX.txt")
     }
+
+    // Drop notes queued during a rename or undo survive the operation's outcome.
+    @MainActor func testDropNotesDuringRenameAndUndoAreKept() async throws {
+        let a = try file("a.txt"), b = try file("b.txt"), c = try file("c.txt")
+        let model = makeModel(journalURL)
+        model.operation.text = "X"
+        model.add([url(a)]); try await waitForIdle(model)
+        model.apply(); XCTAssertEqual(model.state, .applying)
+        model.receiveDrop([url(b), nil]); try await waitForIdle(model)
+        XCTAssertTrue(model.message.contains("1 dropped item was skipped"), model.message)
+        model.undo(); XCTAssertEqual(model.state, .undoing)
+        model.receiveDrop([url(c), nil]); try await waitForIdle(model)
+        XCTAssertTrue(model.message.contains("1 dropped item was skipped"), model.message)
+        model.apply(); XCTAssertEqual(model.state, .applying)
+        model.receiveDrop([nil]); try await waitForIdle(model)
+        XCTAssertTrue(model.message.contains("1 dropped item was skipped"), model.message)
+    }
 }
 #endif
