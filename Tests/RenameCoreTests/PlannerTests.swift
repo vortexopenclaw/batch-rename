@@ -235,6 +235,14 @@ final class InventoryReportTests: ScratchTestCase {
         ]
         for (name, key) in cases { XCTAssertEqual(companionGroupKey(for: name), key, name) }
     }
+    // C6: language and variant suffixes are not camera letters.
+    func testCompanionGroupKeysIgnoreNonDashcamSuffixes() {
+        let cases: [(String, String)] = [
+            ("Manual_FR.pdf", "manual_fr"), ("Manual_FI.pdf", "manual_fi"),
+            ("Notes_HR.txt", "notes_hr"), ("Notes_HI.txt", "notes_hi"), ("Draft_F.txt", "draft_f"),
+        ]
+        for (name, key) in cases { XCTAssertEqual(companionGroupKey(for: name), key, name) }
+    }
     func testIncludeCompanionsAddsSiblingSidecars() throws {
         let dir = root.appendingPathComponent("DCIM")
         let front = try file("2026_1024_222430_004409F.MP4", in: dir)

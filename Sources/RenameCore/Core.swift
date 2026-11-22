@@ -207,10 +207,11 @@ private func locationKey(_ entry: Entry) throws -> String {
     return "\(entry.parent.device)|\(entry.parent.inode)|\(entry.parent.birth)|\(entry.parent.nanos)|\(Data(name.utf8).base64EncodedString())"
 }
 
-private let companionCamera = try! NSRegularExpression(pattern: "^(.*[0-9_](?:[A-Z])?)[FRI]$")
+private let companionCamera = try! NSRegularExpression(pattern: "^(.*[0-9](?:_[A-Z]?)?)[FRI]$")
 /// Dashcam companion grouping: front/rear/interior clips and sidecars share a key.
-/// The stem drops its extension and a trailing camera letter (Viofo `…004409F`,
-/// BlackVue `…_NF`, Thinkware `…_F`), then is lowercased.
+/// The stem drops its extension and a trailing camera letter that follows a digit
+/// (Viofo `…004409F`, Thinkware `…_00_F`, BlackVue `…_123456_NF`), then is lowercased.
+/// Language or variant suffixes such as `Manual_FR` keep their letters.
 public func companionGroupKey(for name: String) -> String {
     var stem = name
     if let dot = name.lastIndex(of: "."), dot != name.startIndex { stem = String(name[..<dot]) }
