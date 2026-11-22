@@ -161,6 +161,25 @@ final class UIBugTests: ScratchTestCase {
     }
 
     // R2: committing the inline editor without changes never detaches or freezes a companion.
+    @MainActor func testEditorClosesWhenItsRowIsRemoved() async throws {
+        let a = try file("a.txt"); try file("b.txt")
+        let model = makeModel(journalURL)
+        model.operation.text = "X"
+        model.add([url(a), url((a as NSString).deletingLastPathComponent + "/b.txt")]); try await waitForIdle(model)
+        let coordinator = PreviewTable.Coordinator(model)
+        let table = PreviewTable.makeScroll(coordinator: coordinator).documentView as! PreviewNativeTable
+        PreviewTable.sync(table, coordinator: coordinator, model: model)
+        let index = model.visibleRows.firstIndex { $0.original == "a.txt" }!
+        coordinator.beginEditing(row: index, in: table)
+        XCTAssertTrue(model.inlineEditing)
+        model.selection = [model.visibleRows[index].id]; model.removeSelected()
+        PreviewTable.sync(table, coordinator: coordinator, model: model)
+        XCTAssertNil(coordinator.editor, "The editor must close when its row leaves the list")
+        XCTAssertFalse(model.inlineEditing, "Rename must not stay disabled by a closed editor")
+        try await waitForIdle(model)
+        XCTAssertTrue(model.canRename)
+    }
+
     @MainActor func testUnchangedInlineCommitsKeepCompanionsFollowing() async throws {
         let front = try file("2026_1024_222430_004409F.MP4")
         try file("2026_1024_222430_004409R.MP4")

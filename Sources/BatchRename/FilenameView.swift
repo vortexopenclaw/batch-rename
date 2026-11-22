@@ -237,7 +237,9 @@ struct PreviewTable: NSViewRepresentable {
         defer { coordinator.updating = false }
         table.locked = model.controlsLocked
         // Undo and installation close an open editor; its edit would be refused.
-        if coordinator.editor != nil && (!model.inlineEditing || !model.namesEditable) { coordinator.endEditing(commit: false) }
+        if coordinator.editor != nil && (!model.inlineEditing || !model.namesEditable || !coordinator.editingRowVisible(in: model)) {
+            coordinator.endEditing(commit: false)
+        }
         if coordinator.version != model.rowsVersion {
             coordinator.version = model.rowsVersion
             table.reloadData()
@@ -255,6 +257,11 @@ struct PreviewTable: NSViewRepresentable {
         /// The name shown when editing began; committing it unchanged is not an edit.
         private var editingStart = ""
         init(_ model: Model) { self.model = model }
+        /// The row being edited is still shown (it may have been removed or filtered out).
+        func editingRowVisible(in model: Model) -> Bool {
+            guard let id = editingID else { return true }
+            return model.visibleRows.contains { $0.id == id }
+        }
         @objc func remove() { model.removeSelected() }
         @objc func copyCurrent() { copyNames(current: true) }
         @objc func copyNew() { copyNames(current: false) }
