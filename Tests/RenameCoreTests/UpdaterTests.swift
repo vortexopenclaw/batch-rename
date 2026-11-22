@@ -68,9 +68,9 @@ final class UpdaterTests: XCTestCase {
     func testAllSignedFieldsAndVersionGates() throws {
         let key = Curve25519.Signing.PrivateKey(), url = URL(string: "https://example.invalid/batch-rename/download")!
         let trust = UpdateTrust(publicKey: key.publicKey.rawRepresentation, downloadURL: url)
-        var m = UpdateManifest(bundleIdentifier: "com.vortexopenclaw.batch-rename", version: "0.2.0", build: "2", assetKey: "batch-rename/releases/test.zip", downloadURL: url, sha256: SHA256.hash(data: zip()).map { String(format: "%02x", $0) }.joined(), minimumMacOS: "14.0.0")
-        m.signature = try key.signature(for: m.signedBytes()).base64EncodedString()
-        let fields = ["bundleIdentifier", "version", "build", "assetKey", "downloadURL", "sha256", "minimumMacOS", "signature"]
+        let m = try UpdateManifest(bundleIdentifier: "com.vortexopenclaw.batch-rename", version: "0.2.0", build: "2", assetKey: "batch-rename/releases/test.zip", downloadURL: url, sha256: SHA256.hash(data: zip()).map { String(format: "%02x", $0) }.joined(), minimumMacOS: "14.0.0").signed(with: key)
+        // Envelope tampering is covered field by field in UpdateTests.
+        let fields = ["bundleIdentifier", "version", "build", "assetKey", "downloadURL", "sha256", "minimumMacOS"]
         for field in fields {
             var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(m)) as! [String: Any]
             object[field] = field == "downloadURL" ? "https://example.invalid/evil" : "tampered"

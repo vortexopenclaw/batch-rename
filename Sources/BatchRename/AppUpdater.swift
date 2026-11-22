@@ -38,7 +38,9 @@ private struct InstallPlan: Codable {
                 let fetcher = UpdateFetcher()
                 let manifest = try JSONDecoder().decode(UpdateManifest.self, from: await fetcher.fetch(config.manifestURL, limit: 65536))
                 let os = ProcessInfo.processInfo.operatingSystemVersion
-                try UpdatePolicy.validate(manifest, trust: config.trust, currentVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "", osVersion: "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)", allowCurrent: true)
+                let sequences = UpdateSequenceStore()
+                let payload = try UpdatePolicy.validate(manifest, trust: config.trust, currentVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "", osVersion: "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)", allowCurrent: true, highestSequence: sequences.highest)
+                sequences.record(payload)
                 try await waitForIdle()
                 if UpdatePolicy.sameVersion(manifest.version, Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) {
                     guard !automatic else { return }
@@ -164,7 +166,7 @@ private struct InstallPlan: Codable {
         try requireOnlyInstance(plan.original, allowed: [plan.parent, getpid()])
         let config = try UpdateConfiguration.load()
         let os = ProcessInfo.processInfo.operatingSystemVersion
-        try UpdatePolicy.validate(plan.manifest, trust: config.trust, currentVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "", osVersion: "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)")
+        try UpdatePolicy.validate(plan.manifest, trust: config.trust, currentVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "", osVersion: "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)", highestSequence: UpdateSequenceStore().highest)
         try UpdatePolicy.validateArchive(Data(contentsOf: plan.transaction.appendingPathComponent("release.zip")), manifest: plan.manifest)
         // Re-extract authenticated bytes in the helper, never trust an earlier staged directory.
         let stage = plan.transaction.appendingPathComponent("install")
