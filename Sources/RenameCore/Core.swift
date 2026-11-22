@@ -16,6 +16,24 @@ public struct NamePreview {
     public var skipped = false
     public var deletion = false
 }
+
+func errnoText(_ code: Int32) -> String { String(cString: strerror(code)) }
+
+/// Name equivalence used by case-insensitive APFS, HFS+, and exFAT lookups:
+/// Unicode case folding (ς/σ, ſ/s, ϐ/β) plus canonical composition.
+public func filesystemNameKey(_ name: String) -> String {
+    name.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive], locale: nil).precomposedStringWithCanonicalMapping
+}
+
+/// Per-item values for `{#}`, `{date}`, and `{time}` tokens.
+public struct TokenContext: Sendable, Equatable {
+    /// 1-based position of the item in the list.
+    public var index: Int
+    /// Modification date (dashcam clips keep their recording time there).
+    public var modified: Date?
+    public init(index: Int = 1, modified: Date? = nil) { self.index = index; self.modified = modified }
+}
+
 public struct RenameOperation: Equatable {
     public var action: Action = .append
     public var scope: Scope = .base
@@ -24,11 +42,48 @@ public struct RenameOperation: Equatable {
     public var skipExistingSuffix = true
     public var ignoreCase = false
     public var occurrences: Occurrences = .all
+    /// Value of `{#}` for the first item.
+    public var sequenceStart = 1
     public init() {}
-    public func name(_ original: String, folder: Bool = false) throws -> String {
-        try preview(original, folder: folder).name
+    public func name(_ original: String, folder: Bool = false, context: TokenContext = TokenContext()) throws -> String {
+        try preview(original, folder: folder, context: context).name
     }
-    public func preview(_ original: String, folder: Bool = false) throws -> NamePreview {
+    /// Expands tokens in `text` only. Unknown `{...}` stays literal.
+    public func expandedText(_ context: TokenContext) -> String {
+        guard text.contains("{") else { return text }
+        var result = "", rest = Substring(text)
+        while let open = rest.firstIndex(of: "{") {
+            result += rest[..<open]
+            let after = rest[rest.index(after: open)...]
+            if let close = after.firstIndex(of: "}"), let value = tokenValue(String(after[..<close]), context) {
+                result += value
+                rest = after[after.index(after: close)...]
+            } else {
+                result += "{"
+                rest = after
+            }
+        }
+        return result + rest
+    }
+    private func tokenValue(_ token: String, _ context: TokenContext) -> String? {
+        if (1...4).contains(token.count), token.allSatisfy({ $0 == "#" }) {
+            let n = sequenceStart + context.index - 1
+            let digits = String(n.magnitude)
+            return (n < 0 ? "-" : "") + String(repeating: "0", count: max(0, token.count - digits.count)) + digits
+        }
+        guard token == "date" || token == "time", let date = context.modified else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let c = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        return token == "date"
+            ? String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+            : String(format: "%02d.%02d.%02d", c.hour ?? 0, c.minute ?? 0, c.second ?? 0)
+    }
+    /// Produces the proposed name. Filesystem-dependent validation lives in `Planner`.
+    public func preview(_ original: String, folder: Bool = false, context: TokenContext = TokenContext()) throws -> NamePreview {
+        // Folders have no extension: extension scope leaves them unchanged.
+        if folder && scope == .ext { return NamePreview(name: original) }
+        let text = expandedText(context)
         var target = original.startIndex..<original.endIndex
         if !folder, scope != .full {
             let dot = original.lastIndex(of: ".").flatMap { $0 == original.startIndex ? nil : $0 }
@@ -42,8 +97,8 @@ public struct RenameOperation: Equatable {
         var transformed = ""
         switch action {
         case .append:
-            // Exact UTF-8 suffix comparison: no case folding or word deduplication.
-            if skipExistingSuffix && !text.isEmpty && value.utf8.suffix(text.utf8.count).elementsEqual(text.utf8) {
+            // Exact suffix comparison after canonical composition: no case folding or word deduplication.
+            if skipExistingSuffix && !text.isEmpty && value.precomposedStringWithCanonicalMapping.utf8.reversed().starts(with: text.precomposedStringWithCanonicalMapping.utf8.reversed()) {
                 result.skipped = true; return result
             }
             transformed = value + text
@@ -59,10 +114,12 @@ public struct RenameOperation: Equatable {
             }
         case .replace:
             guard !search.isEmpty else { throw RenameError("Enter text to find.") }
-            let options: String.CompareOptions = ignoreCase ? [.literal, .caseInsensitive] : [.literal]
+            // Canonical equivalence (not .literal): NFD names match NFC search text.
+            let options: String.CompareOptions = ignoreCase ? [.caseInsensitive] : []
             var cursor = target.lowerBound
             while cursor < target.upperBound,
-                  let match = original.range(of: search, options: options, range: cursor..<target.upperBound, locale: Locale(identifier: "en_US_POSIX")) {
+                  let match = original.range(of: search, options: options, range: cursor..<target.upperBound, locale: Locale(identifier: "en_US_POSIX")),
+                  !match.isEmpty {
                 transformed += original[cursor..<match.lowerBound]
                 result.sourceMatches.append(NSRange(match, in: original))
                 result.replacements.append(NSRange(location: prefix.utf16.count + transformed.utf16.count, length: text.utf16.count))
@@ -81,10 +138,21 @@ public struct RenameOperation: Equatable {
             }
         }
         result.name = prefix + transformed + suffix
-        guard !result.name.isEmpty, result.name != ".", result.name != "..", !result.name.contains("/"), !result.name.contains("\0"), !result.name.contains(":") else { throw RenameError("Invalid filename.") }
+        if let problem = Self.nameProblem(result.name, original: original) { throw RenameError(problem) }
         return result
     }
+    /// Name-only validity, independent of the volume.
+    static func nameProblem(_ name: String, original: String) -> String? {
+        if name.isEmpty || name == "." || name == ".." { return "Invalid name." }
+        let bytes = name.utf8
+        if bytes.contains(0x2F) { return "Names cannot contain “/”." }
+        if bytes.contains(0) { return "Names cannot contain a null character." }
+        // Finder shows “:” as “/”; allow existing colons but never add new ones.
+        if bytes.filter({ $0 == 0x3A }).count > original.utf8.filter({ $0 == 0x3A }).count { return "Names cannot contain “:”." }
+        return nil
+    }
 }
+
 public struct Identity: Codable, Equatable, Sendable {
     public let device: Int32
     public let inode: UInt64
@@ -99,14 +167,20 @@ public struct Identity: Codable, Equatable, Sendable {
     init(_ s: stat) { device = s.st_dev; inode = s.st_ino; birth = Int64(s.st_birthtimespec.tv_sec); nanos = Int64(s.st_birthtimespec.tv_nsec); kind = s.st_mode & UInt16(S_IFMT); size = kind == UInt16(S_IFREG) ? s.st_size : 0; modified = kind == UInt16(S_IFREG) ? Int64(s.st_mtimespec.tv_sec) : 0; modifiedNanos = kind == UInt16(S_IFREG) ? Int64(s.st_mtimespec.tv_nsec) : 0 }
     public static func read(_ path: String) throws -> Identity {
         var s = stat()
-        guard lstat(path, &s) == 0 else { throw RenameError("Cannot inspect \(path): \(String(cString: strerror(errno)))") }
+        guard lstat(path, &s) == 0 else { throw RenameError("Cannot inspect \(path): \(errnoText(errno))") }
         return Identity(s)
+    }
+    /// The same directory entry object, ignoring content edits (size and modification time).
+    public func sameLocation(_ other: Identity) -> Bool {
+        device == other.device && inode == other.inode && birth == other.birth && nanos == other.nanos && kind == other.kind
     }
 }
 public struct Entry: Identifiable, Equatable, Sendable {
     public var path: String
     public let identity: Identity
     public let parent: Identity
+    /// Modification time read when the entry was inspected.
+    public let modified: Date?
     public var id: String { path }
     public var name: String { URL(fileURLWithPath: path).lastPathComponent }
     public init(_ path: String) throws {
@@ -114,9 +188,10 @@ public struct Entry: Identifiable, Equatable, Sendable {
         let fd = try directoryFD(URL(fileURLWithPath: self.path).deletingLastPathComponent().path)
         defer { close(fd) }
         var sourceStat = stat(), parentStat = stat()
-        guard fstat(fd, &parentStat) == 0, fstatat(fd, URL(fileURLWithPath: self.path).lastPathComponent, &sourceStat, AT_SYMLINK_NOFOLLOW) == 0 else { throw RenameError("Cannot inspect directory entry: \(self.path)") }
+        guard fstat(fd, &parentStat) == 0, fstatat(fd, URL(fileURLWithPath: self.path).lastPathComponent, &sourceStat, AT_SYMLINK_NOFOLLOW) == 0 else { throw RenameError("Cannot inspect \(self.path): \(errnoText(errno))") }
         identity = Identity(sourceStat)
         parent = Identity(parentStat)
+        modified = Date(timeIntervalSince1970: Double(sourceStat.st_mtimespec.tv_sec) + Double(sourceStat.st_mtimespec.tv_nsec) / 1_000_000_000)
         guard identity != parent, identity.device == parent.device else { throw RenameError("Volume roots are not allowed.") }
     }
 }
@@ -129,11 +204,38 @@ private func locationKey(_ entry: Entry) throws -> String {
     // or Unicode comparison policy. Byte encoding preserves distinct hardlinks.
     return "\(entry.parent.device)|\(entry.parent.inode)|\(entry.parent.birth)|\(entry.parent.nanos)|\(Data(name.utf8).base64EncodedString())"
 }
+
+private let companionCamera = try! NSRegularExpression(pattern: "^(.*[0-9_](?:[A-Z])?)[FRI]$")
+/// Dashcam companion grouping: front/rear/interior clips and sidecars share a key.
+/// The stem drops its extension and a trailing camera letter (Viofo `…004409F`,
+/// BlackVue `…_NF`, Thinkware `…_F`), then is lowercased.
+public func companionGroupKey(for name: String) -> String {
+    var stem = name
+    if let dot = name.lastIndex(of: "."), dot != name.startIndex { stem = String(name[..<dot]) }
+    let ns = stem as NSString
+    if let match = companionCamera.firstMatch(in: stem, range: NSRange(location: 0, length: ns.length)) {
+        stem = ns.substring(with: match.range(at: 1))
+    }
+    return stem.lowercased()
+}
+
+public struct ScanReport: Sendable {
+    public var entries: [Entry]
+    /// Explicit roots that are missing or cannot be inspected.
+    public var missingRoots: [String]
+    /// Skipped descendants, each naming the path and the system error.
+    public var issues: [String]
+}
 public struct Inventory: Sendable {
     public var roots: [String] = []
     public var files = true, folders = false, recursive = false
+    /// Explicitly added regular files also add sibling files with the same `companionGroupKey`.
+    public var includeCompanions = false
     public init() {}
-    public mutating func append(_ paths: [String]) { for p in paths { let p = URL(fileURLWithPath: p).standardizedFileURL.path; if !roots.contains(p) { roots.append(p) } } }
+    public mutating func append(_ paths: [String]) {
+        var known = Set(roots)
+        for p in paths { let p = URL(fileURLWithPath: p).standardizedFileURL.path; if known.insert(p).inserted { roots.append(p) } }
+    }
     public mutating func removeRoots(matching entries: [Entry]) {
         let paths = Set(entries.map(\.path))
         let keys = Set(entries.compactMap { try? locationKey($0) })
@@ -143,35 +245,63 @@ public struct Inventory: Sendable {
             return keys.contains(key)
         }
     }
+    /// Throws only for missing explicit roots; unreadable descendants are skipped.
     public func scan() throws -> [Entry] {
-        var result: [Entry] = [], seen = Set<String>()
-        func visit(_ path: String, explicit: Bool, device: Int32?) throws {
-            let e = try Entry(path)
+        let report = scanReport()
+        if let missing = report.missingRoots.first { throw RenameError("Cannot find or inspect \(missing).") }
+        return report.entries
+    }
+    public func scanReport() -> ScanReport {
+        var result: [Entry] = [], seen = Set<String>(), missing: [String] = [], issues: [String] = []
+        var listings: [String: [String]] = [:]
+        func list(_ path: String) -> [String]? {
+            if let cached = listings[path] { return cached }
+            do { let names = try directoryNames(path).sorted(); listings[path] = names; return names }
+            catch { issues.append(error.localizedDescription); return nil }
+        }
+        func visit(_ path: String, explicit: Bool, device: Int32?) {
+            let e: Entry
+            do { e = try Entry(path) } catch {
+                if explicit { missing.append(path) } else { issues.append(error.localizedDescription) }
+                return
+            }
             if let device, e.identity.device != device { return }
             if !explicit && e.name.hasPrefix(".") { return }
-            let newlySeen = seen.insert(try locationKey(e)).inserted
+            guard let key = try? locationKey(e) else { issues.append("Cannot determine directory entry name: \(path)"); return }
+            let newlySeen = seen.insert(key).inserted
             if !newlySeen && !explicit { return }
             if newlySeen && (e.identity.folder ? folders : files) { result.append(e) }
-            guard e.identity.folder else { return }
-            let values = try URL(fileURLWithPath: path).resourceValues(forKeys: [.isPackageKey, .isAliasFileKey])
-            if values.isPackage == true || values.isAliasFile == true { return }
-            if explicit || recursive {
-                for name in try directoryNames(path).sorted() {
-                    let child = URL(fileURLWithPath: path).appendingPathComponent(name).path
-                    if name.hasPrefix(".") { continue }
-                    let ci = try Identity.read(child)
-                    if ci.device != e.identity.device { continue }
-                    if ci.folder && !recursive {
-                        if folders {
-                            let entry = try Entry(child)
-                            if seen.insert(try locationKey(entry)).inserted { result.append(entry) }
-                        }
-                    } else { try visit(child, explicit: false, device: e.identity.device) }
+            if explicit && includeCompanions && e.identity.kind == UInt16(S_IFREG) {
+                let parent = URL(fileURLWithPath: e.path).deletingLastPathComponent().path
+                let group = companionGroupKey(for: e.name)
+                for name in list(parent) ?? [] where !name.hasPrefix(".") && companionGroupKey(for: name) == group {
+                    let child = URL(fileURLWithPath: parent).appendingPathComponent(name).path
+                    guard let ci = try? Identity.read(child), ci.kind == UInt16(S_IFREG), ci.device == e.identity.device else { continue }
+                    visit(child, explicit: false, device: e.identity.device)
                 }
             }
+            guard e.identity.folder else { return }
+            do {
+                let values = try URL(fileURLWithPath: path).resourceValues(forKeys: [.isPackageKey, .isAliasFileKey])
+                if values.isPackage == true || values.isAliasFile == true { return }
+            } catch { issues.append("Cannot inspect \(path): \(error.localizedDescription)"); return }
+            guard explicit || recursive, let names = list(path) else { return }
+            for name in names where !name.hasPrefix(".") {
+                let child = URL(fileURLWithPath: path).appendingPathComponent(name).path
+                let ci: Identity
+                do { ci = try Identity.read(child) } catch { issues.append(error.localizedDescription); continue }
+                if ci.device != e.identity.device { continue }
+                if ci.folder && !recursive {
+                    guard folders else { continue }
+                    do {
+                        let entry = try Entry(child)
+                        if seen.insert(try locationKey(entry)).inserted { result.append(entry) }
+                    } catch { issues.append(error.localizedDescription) }
+                } else { visit(child, explicit: false, device: e.identity.device) }
+            }
         }
-        for root in roots { try visit(root, explicit: true, device: nil) }
-        return result
+        for root in roots { visit(root, explicit: true, device: nil) }
+        return ScanReport(entries: result, missingRoots: missing, issues: issues)
     }
 }
 public struct PlanItem: Sendable {
@@ -179,42 +309,107 @@ public struct PlanItem: Sendable {
     public let destination: String
     public init(entry: Entry, destination: String) { self.entry = entry; self.destination = destination }
 }
+/// A requested name for one entry (for example a per-clip description).
+public struct Proposal: Sendable {
+    public var entry: Entry
+    public var name: String
+    public init(entry: Entry, name: String) { self.entry = entry; self.name = name }
+}
+public struct PlanResult: Sendable {
+    /// Valid renames, descendants before their parents.
+    public var items: [PlanItem]
+    /// User-readable problems keyed by entry path. Problem rows are excluded from `items`.
+    public var problems: [String: String]
+    public init(items: [PlanItem], problems: [String: String]) { self.items = items; self.problems = problems }
+}
 public enum Planner {
-    public static func plan(_ entries: [Entry], operation: RenameOperation) throws -> [PlanItem] {
-        var result: [PlanItem] = [], targets = Set<String>()
-        for e in entries {
-            let name = try operation.name(e.name, folder: e.identity.folder)
+    private struct Folder { let nameMax: Int; let fat: Bool; var names: Set<[UInt8]>? }
+    private static func folder(_ path: String, _ cache: inout [String: Folder]) -> Folder {
+        if let cached = cache[path] { return cached }
+        let max = pathconf(path, _PC_NAME_MAX)
+        var fs = statfs(), type = ""
+        if statfs(path, &fs) == 0 {
+            type = withUnsafePointer(to: &fs.f_fstypename) { $0.withMemoryRebound(to: CChar.self, capacity: Int(MFSTYPENAMELEN)) { String(cString: $0) } }
+        }
+        let folder = Folder(nameMax: max > 0 ? max : 255, fat: type == "msdos" || type == "exfat", names: nil)
+        cache[path] = folder
+        return folder
+    }
+    static func fatProblem(_ name: String) -> String? {
+        let forbidden: Set<Unicode.Scalar> = ["\"", "*", "/", ":", "<", ">", "?", "\\", "|"]
+        if name.unicodeScalars.contains(where: { forbidden.contains($0) || $0.value < 0x20 || $0.value == 0x7F }) {
+            return "SD card (FAT/exFAT) names cannot contain \" * / : < > ? \\ | or control characters."
+        }
+        if let last = name.unicodeScalars.last, last == " " || last == "." { return "SD card (FAT/exFAT) names cannot end with a space or period." }
+        return nil
+    }
+    public static func plan(proposals: [Proposal]) -> PlanResult {
+        var problems: [String: String] = [:], folders: [String: Folder] = [:]
+        var candidates: [(entry: Entry, name: String, parent: String, key: String)] = []
+        var owners: [String: [String]] = [:]
+        for proposal in proposals {
+            let e = proposal.entry, name = proposal.name
             if name.utf8.elementsEqual(e.name.utf8) { continue }
-            let parent = URL(fileURLWithPath: e.path).deletingLastPathComponent()
-            let max = pathconf(parent.path, _PC_NAME_MAX)
-            guard max > 0, name.utf8.count <= max else { throw RenameError("Filename too long: \(name)") }
-            let dst = parent.appendingPathComponent(name).path
-            guard dst.utf8.count < Int(PATH_MAX) else { throw RenameError("Path too long.") }
+            let parent = URL(fileURLWithPath: e.path).deletingLastPathComponent().path
+            let facts = folder(parent, &folders)
+            var problem = RenameOperation.nameProblem(name, original: e.name)
+            if problem == nil, name.hasPrefix("."), !e.name.hasPrefix(".") { problem = "Would hide this item (name would start with a period)" }
+            if problem == nil, facts.fat { problem = fatProblem(name) }
+            if problem == nil, name.utf16.count > facts.nameMax { problem = "Name is too long (\(name.utf16.count) of \(facts.nameMax) characters)." }
+            if problem == nil, (parent as NSString).appendingPathComponent(name).utf8.count >= Int(PATH_MAX) { problem = "Path is too long." }
+            if let problem { problems[e.path] = problem; continue }
             // Conservative alias rejection catches equivalent planned names even on case-sensitive disks.
-            let key = dst.precomposedStringWithCanonicalMapping.lowercased()
-            guard targets.insert(key).inserted else { throw RenameError("Duplicate proposed name: \(name)") }
-            if let existing = try? Identity.read(dst) {
-                let names = try FileManager.default.contentsOfDirectory(atPath: parent.path)
-                let exactDestination = names.contains { $0.utf8.elementsEqual(name.utf8) }
-                guard existing == e.identity, !exactDestination else { throw RenameError("Destination exists: \(name)") }
+            let key = "\(e.parent.device)|\(e.parent.inode)|\(filesystemNameKey(name))"
+            owners[key, default: []].append(e.path)
+            candidates.append((e, name, parent, key))
+        }
+        var items: [(depth: Int, item: PlanItem)] = []
+        for c in candidates {
+            if owners[c.key, default: []].count > 1 { problems[c.entry.path] = "Another item would get the same name (“\(c.name)”)."; continue }
+            let destination = (c.parent as NSString).appendingPathComponent(c.name)
+            if let existing = try? Identity.read(destination) {
+                // The filesystem itself resolved the name. Only an equivalent spelling of this
+                // same entry (case or Unicode form) is a rename; anything else is occupied.
+                var facts = folder(c.parent, &folders)
+                if facts.names == nil {
+                    facts.names = (try? directoryNames(c.parent)).map { Set($0.map { Array($0.utf8) }) } ?? []
+                    folders[c.parent] = facts
+                }
+                let equivalent = filesystemNameKey(c.name) == filesystemNameKey(c.entry.name) && existing == c.entry.identity
+                guard equivalent, !(facts.names ?? []).contains(Array(c.name.utf8)) else {
+                    problems[c.entry.path] = "An item named “\(c.name)” already exists."; continue
+                }
             }
-            result.append(PlanItem(entry: e, destination: dst))
+            items.append((c.entry.path.utf8.reduce(0) { $1 == 0x2F ? $0 + 1 : $0 }, PlanItem(entry: c.entry, destination: destination)))
         }
-        return result.sorted { a, b in
-            let ad = a.entry.path.split(separator: "/").count, bd = b.entry.path.split(separator: "/").count
-            return ad == bd ? a.entry.path < b.entry.path : ad > bd
+        items.sort { $0.depth == $1.depth ? $0.item.entry.path < $1.item.entry.path : $0.depth > $1.depth }
+        return PlanResult(items: items.map(\.item), problems: problems)
+    }
+    /// Legacy all-or-nothing planning: throws the first problem in entry order.
+    /// Token indices follow entry order.
+    public static func plan(_ entries: [Entry], operation: RenameOperation) throws -> [PlanItem] {
+        var proposals: [Proposal] = []
+        for (i, e) in entries.enumerated() {
+            let name = try operation.name(e.name, folder: e.identity.folder, context: TokenContext(index: i + 1, modified: e.modified))
+            proposals.append(Proposal(entry: e, name: name))
         }
+        let result = plan(proposals: proposals)
+        if let first = entries.first(where: { result.problems[$0.path] != nil }) { throw RenameError(result.problems[first.path]!) }
+        return result.items
     }
 }
 
 // Open every ancestor without following symlinks. Hold the parent descriptor through rename.
 func directoryFD(_ path: String) throws -> Int32 {
     var fd = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-    guard fd >= 0 else { throw RenameError("Cannot open filesystem root.") }
+    guard fd >= 0 else { throw RenameError("Cannot open filesystem root: \(errnoText(errno))") }
     for component in path.split(separator: "/") {
         let next = openat(fd, String(component), O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        let code = errno
         close(fd)
-        guard next >= 0 else { throw RenameError("An ancestor is unavailable or a symlink: \(path)") }
+        guard next >= 0 else {
+            throw RenameError("Cannot open folder \(path): \(errnoText(code))" + (code == ELOOP ? " (an ancestor is a symlink)" : ""))
+        }
         fd = next
     }
     return fd
@@ -394,7 +589,7 @@ public final class Engine {
 
 func directoryNames(_ path: String) throws -> [String] {
     let fd = try directoryFD(path)
-    guard let directory = fdopendir(fd) else { close(fd); throw RenameError("Cannot enumerate directory.") }
+    guard let directory = fdopendir(fd) else { let code = errno; close(fd); throw RenameError("Cannot list folder \(path): \(errnoText(code))") }
     defer { closedir(directory) }
     var names: [String] = []
     errno = 0
@@ -405,6 +600,6 @@ func directoryNames(_ path: String) throws -> [String] {
         if name != "." && name != ".." { names.append(name) }
         errno = 0
     }
-    guard errno == 0 else { throw RenameError("Directory enumeration failed.") }
+    guard errno == 0 else { throw RenameError("Cannot list folder \(path): \(errnoText(errno))") }
     return names
 }

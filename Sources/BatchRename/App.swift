@@ -105,15 +105,18 @@ struct Row: Identifiable {
         busy = true
         let inventory = inventory
         worker.async {
-            let result = Result { try inventory.scan() }
+            let report = inventory.scanReport()
             DispatchQueue.main.async {
                 self.busy = false
                 if self.rebuildPending || !self.pendingURLs.isEmpty {
                     self.rebuild()
                     return
                 }
-                switch result {
-                case .success(let entries):
+                // Missing roots must not fail every later scan.
+                let missing = Set(report.missingRoots)
+                self.inventory.roots.removeAll { missing.contains($0) }
+                let entries = report.entries
+                do {
                     self.refreshFrozen()
                     let completed = self.rows.filter { $0.done && self.frozen.contains(self.key($0.entry)) }
                     let visible = Set(completed.map { self.key($0.entry) })
@@ -123,7 +126,9 @@ struct Row: Identifiable {
                     }
                     self.selection.formIntersection(Set(self.rows.map(\.id)))
                     self.preview()
-                case .failure(let error): self.plan = []; self.message = error.localizedDescription
+                    if let problem = report.missingRoots.map({ "Cannot find \($0)." }).first ?? report.issues.first {
+                        self.message = "Skipped \(report.missingRoots.count + report.issues.count) unavailable items (\(problem)) " + self.message
+                    }
                 }
             }
         }
