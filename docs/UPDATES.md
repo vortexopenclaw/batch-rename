@@ -61,8 +61,9 @@ The new app acknowledges only after its window appears, the undo journal opens, 
 On every healthy launch the app:
 
 - clears a recovery notice whose transaction it is the acknowledged result of (for example, a slow startup that acknowledged after the helper gave up),
-- keeps only the newest acknowledged transaction, trimmed to `previous.app`, `plan.json`, and `healthy` (its `release.zip` and empty `install` directory are removed), and
-- deletes older acknowledged transactions for this app.
+- keeps the acknowledged transaction with the highest manifest build, plus any whose manifest version and build match the running app (its `previous.app` is the only rollback), ordering by build number rather than file dates so clock skew cannot pick the wrong one,
+- removes only `release.zip` and the `install` and `stage` directories from kept transactions; `previous.app`, `plan.json`, `healthy`, and small records such as `ready`, `original-code.sha256`, `original-info.plist`, and any `failed-*` or `restore-*` copies stay, and
+- deletes the other acknowledged transactions for this app.
 
 Transactions that are unacknowledged, hold `NEEDS-RECOVERY.txt`, belong to another app path, or cannot be read are never deleted.
 
