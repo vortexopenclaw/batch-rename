@@ -280,5 +280,11 @@ final class UIBugTests: ScratchTestCase {
         XCTAssertEqual(defaults.data(forKey: "PresetsUnreadable"), Data("not json".utf8))
         XCTAssertEqual(SettingsStore(defaults: defaults).presets.map(\.name), ["Fresh"])
     }
+
+    // Cmd+Z never undoes a batch without confirmation while a sheet is open.
+    func testUndoRoutingWithSheetOpen() {
+        XCTAssertEqual(UndoRouting.undo(editingText: false, sheetOpen: true, batchAvailable: true, locked: false), .text)
+        XCTAssertEqual(UndoRouting.undo(editingText: false, sheetOpen: false, batchAvailable: true, locked: false), .batch)
+    }
 }
 #endif

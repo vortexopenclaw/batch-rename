@@ -120,8 +120,9 @@ extension Scope {
 enum UndoRoute: Equatable { case text, batch, none }
 /// Cmd+Z goes to the text being edited first; otherwise it undoes the last batch.
 enum UndoRouting {
-    static func undo(editingText: Bool, batchAvailable: Bool, locked: Bool) -> UndoRoute {
-        if editingText { return .text }
+    /// With a sheet open, a batch undo needs the sheet's confirmation, so Cmd+Z only undoes text.
+    static func undo(editingText: Bool, sheetOpen: Bool = false, batchAvailable: Bool, locked: Bool) -> UndoRoute {
+        if editingText || sheetOpen { return .text }
         return batchAvailable && !locked ? .batch : .none
     }
     /// Batches are never redone.

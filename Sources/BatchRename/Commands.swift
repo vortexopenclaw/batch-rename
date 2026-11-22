@@ -11,7 +11,7 @@ struct AppCommands: Commands {
         CommandGroup(replacing: .newItem) {
             Button("Add Files or Folders…") { model.choose() }.keyboardShortcut("o")
         }
-        // Cmd+Z undoes text edits while a field is being edited, otherwise the last batch.
+        // Cmd+Z undoes text edits while a field is being edited or a sheet is open, otherwise the last batch.
         CommandGroup(replacing: .undoRedo) {
             Button("Undo") { EditRouting.undo(model) }.keyboardShortcut("z")
             Button("Redo") { EditRouting.redo() }.keyboardShortcut("z", modifiers: [.command, .shift])
@@ -29,8 +29,13 @@ struct AppCommands: Commands {
         guard let responder = NSApp.keyWindow?.firstResponder as? NSTextView else { return false }
         return responder.isFieldEditor
     }
+    /// A sheet (such as History) is attached to the key window, or is the key window.
+    static var sheetOpen: Bool {
+        guard let window = NSApp.keyWindow else { return false }
+        return window.attachedSheet != nil || window.sheetParent != nil
+    }
     static func undo(_ model: Model) {
-        switch UndoRouting.undo(editingText: editingText, batchAvailable: model.undoAvailable, locked: model.controlsLocked) {
+        switch UndoRouting.undo(editingText: editingText, sheetOpen: sheetOpen, batchAvailable: model.undoAvailable, locked: model.controlsLocked) {
         case .text: NSApp.sendAction(Selector(("undo:")), to: nil, from: nil)
         case .batch: model.undo()
         case .none: NSSound.beep()
