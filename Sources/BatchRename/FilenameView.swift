@@ -248,6 +248,8 @@ struct PreviewTable: NSViewRepresentable {
         var version = -1
         private(set) var editor: NSTextField?
         private var editingID: UUID?
+        /// The name shown when editing began; committing it unchanged is not an edit.
+        private var editingStart = ""
         init(_ model: Model) { self.model = model }
         @objc func remove() { model.removeSelected() }
         @objc func copyCurrent() { copyNames(current: true) }
@@ -292,7 +294,7 @@ struct PreviewTable: NSViewRepresentable {
             field.isBordered = true; field.focusRingType = .exterior
             field.setAccessibilityLabel(String(localized: "New Name"))
             field.delegate = self
-            editor = field; editingID = rows[index].id
+            editor = field; editingID = rows[index].id; editingStart = field.stringValue
             table.addSubview(field)
             table.scrollRowToVisible(index)
             if table.window?.makeFirstResponder(field) == true, let text = field.currentEditor() {
@@ -307,7 +309,7 @@ struct PreviewTable: NSViewRepresentable {
             let text = field.stringValue
             let table = field.superview as? NSTableView
             field.removeFromSuperview()
-            if commit { model.setOverride(id, to: text) }
+            if commit && !text.utf8.elementsEqual(editingStart.utf8) { model.setOverride(id, to: text) }
             if let table { table.window?.makeFirstResponder(table) }
         }
         func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {

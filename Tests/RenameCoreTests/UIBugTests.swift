@@ -159,5 +159,34 @@ final class UIBugTests: ScratchTestCase {
         XCTAssertNil(model.rows[0].problem)
         XCTAssertEqual(model.rows[0].status, "Pending")
     }
+
+    // R2: committing the inline editor without changes never detaches or freezes a companion.
+    @MainActor func testUnchangedInlineCommitsKeepCompanionsFollowing() async throws {
+        let front = try file("2026_1024_222430_004409F.MP4")
+        try file("2026_1024_222430_004409R.MP4")
+        let model = makeModel(journalURL)
+        model.companions = true; try await waitForIdle(model)
+        model.operation.text = ", T340"
+        model.add([url(front)]); try await waitForIdle(model)
+        let coordinator = PreviewTable.Coordinator(model)
+        let table = PreviewTable.makeScroll(coordinator: coordinator).documentView as! PreviewNativeTable
+        PreviewTable.sync(table, coordinator: coordinator, model: model)
+        let rearIndex = { model.visibleRows.firstIndex { $0.original.hasSuffix("R.MP4") }! }
+        let rear = { model.rows.first { $0.original.hasSuffix("R.MP4") }! }
+        let frontID = model.rows.first { $0.original.hasSuffix("F.MP4") }!.id
+        // An unchanged commit on the rear clip before the front clip is edited.
+        coordinator.beginEditing(row: rearIndex(), in: table); coordinator.endEditing(commit: true)
+        model.setOverride(frontID, to: "2026_1024_222430_004409F night, T340.MP4"); try await waitForIdle(model)
+        XCTAssertEqual(rear().proposed, "2026_1024_222430_004409R night, T340.MP4")
+        // An unchanged commit on the derived rear name keeps it derived, so a revert carries over.
+        coordinator.beginEditing(row: rearIndex(), in: table); coordinator.endEditing(commit: true)
+        model.useAutomaticName([frontID]); try await waitForIdle(model)
+        XCTAssertEqual(rear().proposed, "2026_1024_222430_004409R, T340.MP4")
+        XCTAssertFalse(rear().manual)
+        // Setting a row that follows nothing to its automatic name does not detach it.
+        model.setOverride(rear().id, to: rear().automatic); try await waitForIdle(model)
+        model.setOverride(frontID, to: "2026_1024_222430_004409F rain, T340.MP4"); try await waitForIdle(model)
+        XCTAssertEqual(rear().proposed, "2026_1024_222430_004409R rain, T340.MP4")
+    }
 }
 #endif

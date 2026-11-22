@@ -306,7 +306,8 @@ struct Row: Identifiable {
         let k = key(row.entry)
         resetNotes()
         if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.utf8.elementsEqual(row.automatic.utf8) {
-            if overrides[k] != nil { overrides[k] = nil; editOrder[k] = nil } else { keepAutomatic.insert(k) }
+            // Only a row following a companion edit detaches; others have nothing to follow yet.
+            if overrides[k] != nil { overrides[k] = nil; editOrder[k] = nil } else if row.manual { keepAutomatic.insert(k) }
         } else {
             editCounter += 1
             overrides[k] = name; editOrder[k] = editCounter; keepAutomatic.remove(k)
