@@ -602,7 +602,17 @@ public final class Engine {
         guard case .begin(let logGeneration) = first else { throw RenameError("The undo journal log is damaged. Preserve \(logURL.path) and inspect files before recovery.") }
         generation = logGeneration
         if journal.merged == logGeneration { return } // Compacted before the log was unlinked.
-        for record in records.dropFirst() { apply(record) }
+        // 0.1.3 rewrites snapshots without step ids or `merged`, so an already merged
+        // log is recognized by step content as well.
+        var byContent: [String: Int]?
+        let contentKey = { (s: Step) in "\(s.batch)|\(s.source)|\(s.destination)|\(s.identity)" }
+        for record in records.dropFirst() {
+            if case .intent(let step) = record, positions[step.id] == nil {
+                if byContent == nil { byContent = Dictionary(journal.steps.enumerated().map { (contentKey($0.element), $0.offset) }, uniquingKeysWith: { first, _ in first }) }
+                if let i = byContent?[contentKey(step)] { positions[step.id] = i; continue }
+            }
+            apply(record)
+        }
     }
     private func apply(_ record: LogRecord) {
         switch record {

@@ -362,6 +362,21 @@ final class JournalLogTests: ScratchTestCase {
         let e = try engine()
         XCTAssertEqual(e.steps.count, 1); XCTAssertTrue(e.canUndo)
     }
+    // C3: crash after compaction, then 0.1.3 rewrote the snapshot without ids or `merged`.
+    func testReplayAfterLegacyRewriteDoesNotDuplicateMergedStep() throws {
+        let a = try file("a"), s = try step(a)
+        let legacyIdentity = { (i: Identity) in LegacyIdentity(device: i.device, inode: i.inode, birth: i.birth, nanos: i.nanos, kind: i.kind, size: i.size, modified: i.modified, modifiedNanos: i.modifiedNanos) }
+        try FileManager.default.createDirectory(at: journalURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(LegacyJournal(steps: [LegacyStep(source: s.source, destination: s.destination, identity: legacyIdentity(s.identity), parent: legacyIdentity(s.parent), batch: s.batch, done: true, undone: true)])).write(to: journalURL)
+        try writeLog([.intent(s), .done(s.id)])
+        XCTAssertTrue(exists(a)); XCTAssertFalse(exists(a + "X"))
+        let e = try engine()
+        XCTAssertLessThanOrEqual(e.steps.filter { $0.source == a }.count, 1)
+        XCTAssertFalse(e.canUndo)
+        XCTAssertFalse(e.history.contains { $0.applied })
+        XCTAssertEqual(try e.undo(), ApplyOutcome(renamed: 0, total: 0, cancelled: false))
+        XCTAssertTrue(exists(a))
+    }
     func testCrashWhileUndoing() throws {
         let a = try file("a"), s = try step(a, done: true)
         try FileManager.default.moveItem(atPath: a, toPath: a + "X")
