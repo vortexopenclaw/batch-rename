@@ -145,5 +145,19 @@ final class UIBugTests: ScratchTestCase {
         XCTAssertTrue(exists(root.appendingPathComponent("f0X.txt").path))
         XCTAssertFalse(exists(root.appendingPathComponent("f0XY.txt").path))
     }
+
+    // R1: a resolved planner problem clears even when the proposed name is unchanged.
+    @MainActor func testResolvedProblemClearsWhileProposalIsUnchanged() async throws {
+        let a = try file("a.txt"), blocker = try file("aX.txt")
+        let model = makeModel(journalURL)
+        model.operation.text = "X"
+        model.add([url(a)]); try await waitForIdle(model)
+        XCTAssertNotNil(model.rows[0].problem)
+        try FileManager.default.removeItem(atPath: blocker)
+        model.setType("zzz", enabled: false); try await waitForIdle(model)
+        XCTAssertEqual(model.pendingCount, 1)
+        XCTAssertNil(model.rows[0].problem)
+        XCTAssertEqual(model.rows[0].status, "Pending")
+    }
 }
 #endif

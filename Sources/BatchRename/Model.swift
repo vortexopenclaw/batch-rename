@@ -502,8 +502,8 @@ struct Row: Identifiable {
         rows = updated
         plan = []
         proposalCount = proposals.count
-        let current = generation
-        guard !proposals.isEmpty else { finishValidation(PlanResult(items: [], problems: [:]), generation: current); return }
+        let current = generation, proposed = Set(proposals.map(\.entry.path))
+        guard !proposals.isEmpty else { finishValidation(PlanResult(items: [], problems: [:]), proposed: proposed, generation: current); return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self, current == self.generation, self.state == .idle else { return }
             let hook = self.beforeValidationForTesting
@@ -512,7 +512,7 @@ struct Row: Identifiable {
                 let result = Planner.plan(proposals: proposals)
                 DispatchQueue.main.async {
                     guard current == self.generation, self.state == .idle else { return }
-                    self.finishValidation(result, generation: current)
+                    self.finishValidation(result, proposed: proposed, generation: current)
                 }
             }
         }
@@ -526,15 +526,17 @@ struct Row: Identifiable {
         preview.deletion = ranges.replacement.length == 0 && ranges.source.length > 0
         return preview
     }
-    private func finishValidation(_ result: PlanResult, generation current: Int) {
+    /// Every proposed row takes this result's problem, so a resolved problem clears.
+    private func finishValidation(_ result: PlanResult, proposed: Set<String>, generation current: Int) {
         plan = result.items
-        if !result.problems.isEmpty {
-            var updated = rows
-            for i in updated.indices where !updated[i].done {
-                if let problem = result.problems[updated[i].entry.path] { updated[i].problem = problem; updated[i].problemName = updated[i].proposed }
-            }
-            rows = updated
+        var updated = rows, changed = false
+        for i in updated.indices where !updated[i].done && proposed.contains(updated[i].entry.path) {
+            let problem = result.problems[updated[i].entry.path]
+            guard updated[i].problem != problem || (problem != nil && updated[i].problemName != updated[i].proposed) else { continue }
+            updated[i].problem = problem; updated[i].problemName = problem == nil ? nil : updated[i].proposed
+            changed = true
         }
+        if changed { rows = updated }
         validatedGeneration = current
         composeMessage()
     }
